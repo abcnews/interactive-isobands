@@ -2,6 +2,7 @@ import { fromArrayBuffer, type GeoTIFFImage } from 'geotiff';
 import { contours as d3Contours } from 'd3-contour';
 import { ColourMode, SequentialPalette, createContinuousScale } from '@abcnews/palette';
 import type { Feature, FeatureCollection, MultiPolygon } from 'geojson';
+import { applyPalette, type BandPalette } from './bandstyle.ts';
 import { pathsToPolygons, type ClipperPath } from './fastclip.ts';
 
 /* ----------------------------- Configuration ------------------------- */
@@ -13,7 +14,6 @@ const COORDINATE_DECIMAL_PLACES = 5;
 const DEFAULT_PALETTE = SequentialPalette.Red;
 
 const DEFAULT_COLOUR_MODE = ColourMode.Light;
-const STYLE_FILL_OPACITY = 1;
 
 /** Pixels processed between yields in the per-pixel loops. */
 const CHUNK_SIZE = 250_000;
@@ -31,8 +31,7 @@ type RasterGrid = {
   readonly noData: number | null;
 };
 
-/** Maps a band's class value to a CSS colour string. */
-export type BandPalette = (value: number) => string;
+export type { BandPalette };
 
 export type IsoBandOptions = {
   readonly propertyName?: string;
@@ -207,30 +206,6 @@ const createDefaultPalette = (classValues: readonly number[]): BandPalette => {
   return createContinuousScale(DEFAULT_PALETTE, DEFAULT_COLOUR_MODE, [min, max === min ? min + 1 : max]);
 };
 
-/** Adds simplestyle-spec properties, colouring each band with the given palette function. */
-const applySimpleStyle = (
-  collection: FeatureCollection<MultiPolygon>,
-  propertyName: string,
-  scale: BandPalette
-): FeatureCollection<MultiPolygon> => {
-  return {
-    ...collection,
-    features: collection.features.map(feature => {
-      const colour = scale(Number(feature.properties?.[propertyName]));
-      return {
-        ...feature,
-        properties: {
-          ...feature.properties,
-          fill: colour,
-          'fill-opacity': STYLE_FILL_OPACITY,
-          'stroke-width': 0,
-          'stroke-opacity': 0
-        }
-      };
-    })
-  };
-};
-
 /* ------------------------------ Output ------------------------------- */
 
 /** Says whether a band actually contains any polygon geometry. */
@@ -314,5 +289,5 @@ export const createIsoBandsFromGeotiff = async (
   }
 
   const bands: FeatureCollection<MultiPolygon> = { type: 'FeatureCollection', features };
-  return applySimpleStyle(removeEmptyBands(bands), propertyName, palette ?? createDefaultPalette(classValues));
+  return applyPalette(removeEmptyBands(bands), palette ?? createDefaultPalette(classValues), propertyName);
 };

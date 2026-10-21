@@ -1,5 +1,22 @@
 <script module lang="ts">
-  import { ColourMode, DivergentPalette, SequentialPalette, getSequentialSteppedPalette } from '@abcnews/palette';
+  import { ColourMode, DivergentPalette, SequentialPalette } from '@abcnews/palette';
+  import {
+    BUILT_IN_SHAPES,
+    MAX_BANDS,
+    PROJECTIONS,
+    PROJECTION_IDS,
+    bandCount as countBands,
+    buildLayout,
+    buildSvg,
+    defaultProjectionFor,
+    inspectTiff,
+    invertShape,
+    rangeFor,
+    tidy,
+    type Bbox,
+    type ProjectionId
+  } from '../../lib/geo.ts';
+  import { OUT_OF_RANGE_COLOUR, summerHeatPalette } from '../../lib/palettes.ts';
   import { booleanCodec, createHashStore, enumCodec, numberCodec, type HashSchema } from './hashstore.svelte.ts';
 
   // Module scope: the store is created once (it registers window listeners), however many times this mounts.
@@ -21,19 +38,6 @@
     palette: (value: number) => string;
   };
 
-  /**
-   * "Summer heat", as used in App.svelte: a stepped (not interpolated) red palette.
-   * Colours are [grey, 25-30, 30-35, 35-40, 40-45, 45+]; anything under 25 gets the grey.
-   */
-  const SUMMER_HEAT_THRESHOLDS = [25, 30, 35, 40, 45];
-  const SUMMER_HEAT_COLOURS = getSequentialSteppedPalette(
-    SUMMER_HEAT_THRESHOLDS.length,
-    SequentialPalette.Red,
-    ColourMode.Light
-  );
-
-  /** Colour for values outside a custom min/max: the same grey the Summer heat preset uses below its first threshold. */
-  const OUT_OF_RANGE_COLOUR = SUMMER_HEAT_COLOURS[0];
 
   const PRESETS = [
     {
@@ -44,10 +48,7 @@
       min: 0,
       max: 55,
       interval: 5,
-      palette: (value: number): string => {
-        const step = SUMMER_HEAT_THRESHOLDS.filter((t) => value >= t).length;
-        return SUMMER_HEAT_COLOURS[Math.min(step, SUMMER_HEAT_COLOURS.length - 1)];
-      }
+      palette: summerHeatPalette
     }
   ] as const satisfies readonly Preset[];
 
@@ -58,45 +59,6 @@
   // ---------------------------------------------------------------------------
   // Settings: synced with the URL hash, and the source of truth for everything below
   // ---------------------------------------------------------------------------
-
-  /** Bundled boundaries. Served from /public. Add more here as they become available. */
-  const BUILT_IN_SHAPES = [
-    { id: 'world-simple', label: 'Continents', url: '../world-sm.geo.json' },
-    { id: 'aus', label: 'Australia', url: '../aus-md.geo.json' },
-    { id: 'aus-simple', label: 'Australia (Simplified)', url: '../aus-sm.geo.json' }
-  ];
-
-  // ---------------------------------------------------------------------------
-  // Projections
-  // ---------------------------------------------------------------------------
-
-  const PROJECTIONS = [
-    { id: 'australia', label: 'Australia (conic conformal)' },
-    { id: 'equal-earth', label: 'Equal Earth' },
-    { id: 'mercator', label: 'Web Mercator' }
-  ] as const;
-
-  type ProjectionId = (typeof PROJECTIONS)[number]['id'];
-  const PROJECTION_IDS: readonly ProjectionId[] = PROJECTIONS.map((p) => p.id);
-
-  /**
-   * Data that sits entirely inside this lon/lat box (degrees) counts as "around Australia" and keeps
-   * the Australian conic projection. Padded beyond the continent so offshore grids still qualify.
-   */
-  const AUSTRALIA_REGION = { west: 100, south: -55, east: 175, north: 0 };
-
-  type Bbox = [west: number, south: number, east: number, north: number];
-
-  /** Picks the starting projection for a dataset: Australian conic if it's around Australia, otherwise Equal Earth. */
-  const defaultProjectionFor = (bbox: Bbox | undefined): ProjectionId => {
-    if (!bbox) return 'equal-earth';
-    const [west, south, east, north] = bbox;
-    // If the extent isn't plausibly lon/lat degrees (e.g. a projected CRS, or a 0-360 grid), we can't judge it.
-    const isDegrees = west >= -180 && east <= 180 && south >= -90 && north <= 90;
-    if (!isDegrees) return 'equal-earth';
-    const { west: w, south: s, east: e, north: n } = AUSTRALIA_REGION;
-    return west >= w && east <= e && south >= s && north <= n ? 'australia' : 'equal-earth';
-  };
 
   type PaletteSource = 'abc-sequential' | 'abc-divergent';
 
@@ -192,11 +154,10 @@
     Loader
   } from '@abcnews/components-builder';
   import { createContinuousScale, getNamedColour } from '@abcnews/palette';
-  import { geoArea, geoConicConformal, geoEqualEarth, geoMercator, geoPath, type GeoProjection } from 'd3-geo';
-  import { fromArrayBuffer } from 'geotiff';
-  import type { Feature, FeatureCollection, Geometry, MultiPoint } from 'geojson';
-  import { createIsobands } from '../../lib/createisobands.ts';
+  import type { FeatureCollection } from 'geojson';
+  import { createIsobandsInWorker } from '../../lib/createisobandsworker.ts';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
+  import IsobandMap from '../IsobandMap/IsobandMap.svelte';
   import type { LoadedData, LoadedSettings } from './FileLoader.svelte';
 
   type Props = {
@@ -214,63 +175,13 @@
   // Constants
   // ---------------------------------------------------------------------------
 
-  /** SVG user-space width. Height is derived from the data's projected shape. */
-  const WIDTH = 1000;
   /** PNG export width in pixels. PNGs are always transparent. */
   const EXPORT_WIDTH = 4000;
-  const MAX_BANDS = 60;
-  /** Max number of raster values kept to draw the range histogram. */
-  const SAMPLE_SIZE = 20000;
-  /** When deriving an interval from the data, aim for roughly this many bands. */
-  const TARGET_BANDS = 10;
 
-  const log = (...args: unknown[]) => console.debug('[isobands]', ...args);
-  const warn = (...args: unknown[]) => console.warn('[isobands]', ...args);
-
-  /** Strips floating point noise (0.30000000000000004 -> 0.3). */
-  const tidy = (n: number) => Number(n.toPrecision(10));
-
-  const niceInterval = (range: number) => {
-    const raw = range / TARGET_BANDS;
-    const pow = 10 ** Math.floor(Math.log10(raw));
-    const f = raw / pow;
-    return tidy((f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * pow);
-  };
+  // Stringified so the details can be copied out of the console.
+  const log = (message: string, details: unknown = {}) => console.debug(`[isobands] ${message} ${JSON.stringify(details)}`);
 
   type DataRange = { min: number; max: number };
-  type Inspection = DataRange & { values: number[]; bbox?: Bbox };
-
-  /** Reads band 1 of the GeoTIFF and returns its min/max plus an evenly strided sample of values, ignoring nodata. */
-  const inspectTiff = async (buf: ArrayBuffer): Promise<Inspection> => {
-    const tiff = await fromArrayBuffer(buf);
-    const image = await tiff.getImage();
-    const noData = image.getGDALNoData();
-    log('geotiff', { width: image.getWidth(), height: image.getHeight(), bands: image.getSamplesPerPixel(), noData });
-    const [raster] = (await image.readRasters({ samples: [0] })) as unknown as ArrayLike<number>[];
-    let lo = Infinity;
-    let hi = -Infinity;
-    const stride = Math.max(1, Math.ceil(raster.length / SAMPLE_SIZE));
-    const values: number[] = [];
-    for (let i = 0; i < raster.length; i++) {
-      const v = raster[i];
-      // Skip NaN/Infinity, declared nodata, and common float sentinels like -3.4e38.
-      if (!Number.isFinite(v) || v === noData || Math.abs(v) > 1e30) continue;
-      if (v < lo) lo = v;
-      if (v > hi) hi = v;
-      if (i % stride === 0) values.push(v);
-    }
-    if (lo > hi) throw new Error('The GeoTIFF contains no valid values in its first band.');
-
-    // Geographic extent, used to choose a projection. Not fatal if the file has no georeferencing.
-    let bbox: Bbox | undefined;
-    try {
-      const [x1, y1, x2, y2] = image.getBoundingBox();
-      bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
-    } catch (e) {
-      log('no bounding box', e);
-    }
-    return { min: lo, max: hi, values, bbox };
-  };
 
   const divergentOptions = Object.entries(DivergentPalette).map(([key, value]) => ({
     key,
@@ -344,7 +255,7 @@
   // ---------------------------------------------------------------------------
 
   // The epsilon stops float noise turning 11.000000000000002 bands into 12.
-  const bandCount = $derived(interval > 0 && max > min ? Math.ceil((max - min) / interval - 1e-9) : 0);
+  const bandCount = $derived(countBands(min, max, interval));
 
   /** True while a crop shape is chosen but not yet available. */
   const clipPending = $derived(clipChoice !== 'none' && !clipShape && !clipError);
@@ -421,25 +332,7 @@
    * (Presets are unaffected: they have a fixed range.)
    */
   const applyDataRange = (r: DataRange) => {
-    let nextMin: number;
-    let nextMax: number;
-    let nextInterval: number;
-    if (r.max === r.min) {
-      nextMin = Math.floor(r.min);
-      nextMax = nextMin + 1;
-      nextInterval = 1;
-    } else {
-      nextInterval = niceInterval(r.max - r.min);
-      nextMin = tidy(Math.floor(r.min / nextInterval) * nextInterval);
-      nextMax = tidy(Math.ceil(r.max / nextInterval) * nextInterval);
-    }
-    settings.update((s) => ({
-      ...s,
-      min: nextMin,
-      max: nextMax,
-      interval: nextInterval,
-      neutral: tidy((nextMin + nextMax) / 2)
-    }));
+    settings.update((s) => ({ ...s, ...rangeFor(r) }));
   };
 
   /**
@@ -560,7 +453,6 @@
     const problem = rangeProblem;
     const waitingOnClip = clipPending || !!clipProblem;
     const opts = { min, max, interval };
-    const usingPreset = !!preset;
 
     if (!data || !range || problem || waitingOnClip) {
       generating = false; // otherwise an in-flight run cancelled by this one leaves the spinner stuck
@@ -581,24 +473,22 @@
       try {
         // Custom ranges only produce bands between min and max, so data outside would be dropped.
         // Add one wide band below and/or above (interval = its whole span) so that data is drawn
-        // too; `colours` paints those bands grey, or with the nearest end colour if that option is on. Presets skip this: their
-        // palettes already handle everything within their (deliberately wide) range.
+        // too; `colours` paints those bands grey, or with the nearest end colour if that option is on.
+        // Presets need this too: their palettes already extend the end colours, but only for bands that exist.
         const parts = [opts];
-        if (!usingPreset) {
-          const loPad = Math.max(Math.abs(range.min), 1) * 1e-6;
-          const hiPad = Math.max(Math.abs(range.max), 1) * 1e-6;
-          if (range.min < min) {
-            const lo = range.min - loPad;
-            parts.push({ min: lo, max: min, interval: min - lo });
-          }
-          if (range.max > max) {
-            const hi = range.max + hiPad;
-            parts.push({ min: max, max: hi, interval: hi - max });
-          }
+        const loPad = Math.max(Math.abs(range.min), 1) * 1e-6;
+        const hiPad = Math.max(Math.abs(range.max), 1) * 1e-6;
+        if (range.min < min) {
+          const lo = range.min - loPad;
+          parts.push({ min: lo, max: min, interval: min - lo });
+        }
+        if (range.max > max) {
+          const hi = range.max + hiPad;
+          parts.push({ min: max, max: hi, interval: hi - max });
         }
         const [main, ...outside] = await Promise.all(
-          // The buffer is copied in case createIsobands transfers it (which would detach it for later runs).
-          parts.map((part) => createIsobands(data.slice(0), { clipTo: boundary, palette: colours, ...part }))
+          // The jobs run in parallel across the worker pool.
+          parts.map((part) => createIsobandsInWorker(data, { clipTo: boundary, palette: colours, ...part }))
         );
         // Outside bands first so the in-range bands draw on top.
         const result = { ...main, features: [...outside.flatMap((r) => r.features), ...main.features] };
@@ -622,394 +512,8 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Inverting the crop shape
-  // ---------------------------------------------------------------------------
-
-  /** Collects every polygon ([exterior, ...holes]) from any GeoJSON input: collections, features, geometries. */
-  const collectPolygons = (input: unknown): number[][][][] => {
-    const out: number[][][][] = [];
-    const walk = (g: any) => {
-      if (!g) return;
-      switch (g.type) {
-        case 'FeatureCollection':
-          g.features?.forEach(walk);
-          break;
-        case 'Feature':
-          walk(g.geometry);
-          break;
-        case 'GeometryCollection':
-          g.geometries?.forEach(walk);
-          break;
-        case 'Polygon':
-          out.push(g.coordinates);
-          break;
-        case 'MultiPolygon':
-          out.push(...g.coordinates);
-          break;
-      }
-    };
-    walk(input);
-    return out;
-  };
-
-  /** Returns the ring wound clockwise or anticlockwise (y up), reversing it if needed. */
-  const orient = (ring: number[][], clockwise: boolean) => ((area(ring) > 0) === clockwise ? ring : [...ring].reverse());
-
-  /**
-   * Builds the "everything except this shape" polygon: a frame with each of the shape's polygons cut out as
-   * a hole, plus any holes *in* the shape (lakes, say) added back as islands. The frame covers the shape and
-   * the raster (or the whole world if the raster isn't georeferenced), padded so no hole touches its edge.
-   * Follows RFC 7946 winding: frame anticlockwise, holes clockwise.
-   */
-  const invertShape = (shape: unknown, bbox: Bbox | undefined) => {
-    const polygons = collectPolygons(shape);
-    if (!polygons.length) {
-      return { problem: 'That shape has no polygons, so it cannot be inverted.' } as const;
-    }
-
-    const { points } = collectPoints({
-      type: 'FeatureCollection',
-      features: polygons.map((coordinates) => ({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates } }))
-    });
-    const shapeExtent = extentOf(points);
-    const [w, s, e, n] = bbox && looksLikeDegrees(bbox) ? bbox : [-180, -90, 180, 90];
-    const PAD = 1;
-    const west = Math.min(shapeExtent.west, w) - PAD;
-    const south = Math.min(shapeExtent.south, s) - PAD;
-    const east = Math.max(shapeExtent.east, e) + PAD;
-    const north = Math.max(shapeExtent.north, n) + PAD;
-
-    const frame = [
-      [west, south],
-      [east, south],
-      [east, north],
-      [west, north],
-      [west, south]
-    ];
-    const holes = polygons.map((polygon) => orient(polygon[0], true));
-    const islands = polygons.flatMap((polygon) => polygon.slice(1).map((ring) => [orient(ring, false)]));
-
-    const shapeOut = {
-      type: 'FeatureCollection',
-      features: [
-        {
-          type: 'Feature',
-          properties: {},
-          geometry: { type: 'MultiPolygon', coordinates: [[orient(frame, false), ...holes], ...islands] }
-        }
-      ]
-    } as unknown as GeoJsonInput;
-    return { shape: shapeOut, frame: { west, south, east, north }, holes: holes.length } as const;
-  };
-
-  // ---------------------------------------------------------------------------
-  // Projecting to SVG paths (same approach as IsobandMap.svelte)
-  // ---------------------------------------------------------------------------
-  //
-  // Every projection is fitted the same way: from the planar lon/lat *vertices* of the geometry
-  // being drawn, never from the polygons themselves. d3's fit*, geoBounds and geoCentroid work on
-  // the sphere, where a ring wound the "wrong" way means "everything except this shape". One such
-  // ring (easy to get out of a clipper) makes the fit cover the whole globe. Fitting to points
-  // can't be fooled by winding. Diagnostics are logged under [isobands] so a bad fit can be traced.
-
-  /** Web Mercator's latitude limit: beyond this the projection runs off to infinity. */
-  const MERCATOR_MAX_LAT = 85.0511;
-
-  /** How to create each projection (unfitted). Adding a ProjectionId forces an entry here. */
-  type ProjectionBuilder = {
-    /** Returns a fresh, unfitted projection. `centreLon` is the data's centre longitude. */
-    create: (centreLon: number) => GeoProjection;
-    /** True if the projection can't take polar vertices (Web Mercator), so latitudes are clamped first. */
-    clampLatitudes?: boolean;
-    /** [south, north] latitudes that make up "the whole world" for this projection. Defaults to [-90, 90]. */
-    worldLatitudes?: [number, number];
-  };
-
-  const PROJECTION_BUILDERS: Record<ProjectionId, ProjectionBuilder> = {
-    // Conformal cones blow up towards the pole on the far side of their parallels, so stop short of it.
-    australia: { create: () => geoConicConformal().parallels([-18, -36]).rotate([-134, 0]), worldLatitudes: [-90, 60] },
-    'equal-earth': { create: (centreLon) => geoEqualEarth().rotate([-centreLon, 0]) },
-    mercator: {
-      create: (centreLon) => geoMercator().rotate([-centreLon, 0]),
-      clampLatitudes: true,
-      worldLatitudes: [-MERCATOR_MAX_LAT, MERCATOR_MAX_LAT]
-    }
-  };
-
-  /** Smallest lon/lat span (degrees) we'll fit to, so a single point or a line doesn't give an infinite scale. */
-  const MIN_SPAN = 0.01;
-
-  type Extent = { west: number; south: number; east: number; north: number };
-
-  /** Shoelace sum over lon/lat: > 0 means clockwise (y up). */
-  const area = (ring: number[][]) =>
-    ring.reduce((sum, [x, y], i) => sum + (ring[(i + 1) % ring.length][0] - x) * (ring[(i + 1) % ring.length][1] + y), 0);
-
-  /** d3-geo wants exterior rings clockwise and holes anticlockwise. */
-  const rewind = (polygon: number[][][]) =>
-    polygon.map((ring, i) => ((area(ring) > 0) === (i === 0) ? ring : [...ring].reverse()));
-
-  /**
-   * Cleans one polygon for drawing: drops degenerate rings (fewer than 4 positions can't enclose
-   * anything; clippers sometimes emit them) and fixes winding. Returns undefined if no usable exterior is left.
-   */
-  const preparePolygon = (polygon: number[][][], stats: { dropped: number }): number[][][] | undefined => {
-    if (!polygon[0] || polygon[0].length < 4) {
-      stats.dropped++;
-      return undefined;
-    }
-    return rewind(polygon.filter((ring, i) => i === 0 || ring.length >= 4));
-  };
-
-  /** Clamps every latitude in a coordinate array to Web Mercator's limit. Vertices at +/-90 otherwise project to Infinity/NaN. */
-  const clampLatitudes = (c: any): any =>
-    typeof c[0] === 'number' ? [c[0], Math.max(-MERCATOR_MAX_LAT, Math.min(MERCATOR_MAX_LAT, c[1])), ...c.slice(2)] : c.map(clampLatitudes);
-
-  /** Flattens every finite [lon, lat] vertex out of a collection, counting any that were skipped as non-finite. */
-  const collectPoints = (collection: FeatureCollection) => {
-    const points: number[][] = [];
-    let skipped = 0;
-    const walk = (c: any) => {
-      if (typeof c[0] === 'number') {
-        if (Number.isFinite(c[0]) && Number.isFinite(c[1])) points.push(c);
-        else skipped++;
-      } else c.forEach(walk);
-    };
-    for (const f of collection.features) if ('coordinates' in f.geometry) walk(f.geometry.coordinates);
-    return { points, skipped };
-  };
-
-  const extentOf = (points: number[][]): Extent => {
-    const e: Extent = { west: Infinity, south: Infinity, east: -Infinity, north: -Infinity };
-    for (const [lon, lat] of points) {
-      if (lon < e.west) e.west = lon;
-      if (lon > e.east) e.east = lon;
-      if (lat < e.south) e.south = lat;
-      if (lat > e.north) e.north = lat;
-    }
-    return e;
-  };
-
-  /** Spacing (degrees) of the sample points along the world's edge. */
-  const WORLD_STEP = 5;
-
-  /** Points tracing the edge of the whole world (lon -180..180) between two latitudes. Enough for d3 to fit to. */
-  const worldOutline = ([south, north]: [number, number]): number[][] => {
-    const points: number[][] = [];
-    for (let lon = -180; lon <= 180; lon += WORLD_STEP) points.push([lon, south], [lon, north]);
-    for (let lat = Math.ceil(south / WORLD_STEP) * WORLD_STEP; lat <= north; lat += WORLD_STEP) points.push([-180, lat], [180, lat]);
-    points.push([-180, south], [180, south], [-180, north], [180, north]);
-    return points;
-  };
-
-  /**
-   * The longitude to centre the map on. Defaults to the middle of the plain west-east extent, which puts
-   * world-spanning data on the Greenwich side as expected. Only when the data is a compact region that
-   * crosses the antimeridian (Fiji, NZ's Chatham Islands, Alaska's Aleutians...) does it centre on the
-   * wrapped arc instead; otherwise such data would be split across both edges of the map.
-   *
-   * "Compact" matters: for world-spanning data the smallest arc just routes around whichever interior gap
-   * is widest (e.g. the Pacific), which would wrongly centre the map on the antimeridian.
-   */
-  const MAX_WRAPPED_SPAN = 180;
-
-  const centreLongitude = (points: number[][]) => {
-    if (!points.length) return { centre: 0, mode: 'empty' as const, planarSpan: 0, wrappedSpan: 0 };
-    const lons = Float64Array.from(points, (p) => p[0]).sort();
-    const west = lons[0];
-    const east = lons[lons.length - 1];
-    const planarSpan = east - west;
-    const planarCentre = (west + east) / 2;
-
-    // Widest empty gap between neighbouring longitudes, counting the one across the antimeridian.
-    let widestGap = west + 360 - east;
-    let wrappedCentre = planarCentre;
-    for (let i = 1; i < lons.length; i++) {
-      const gap = lons[i] - lons[i - 1];
-      if (gap > widestGap) {
-        widestGap = gap;
-        wrappedCentre = (lons[i] + lons[i - 1] + 360) / 2; // data spans lons[i] .. lons[i - 1] + 360
-      }
-    }
-    const wrappedSpan = 360 - widestGap;
-
-    const wrap = planarSpan > MAX_WRAPPED_SPAN && wrappedSpan <= MAX_WRAPPED_SPAN;
-    const centre = wrap ? wrappedCentre : planarCentre;
-    return {
-      centre: ((centre + 540) % 360) - 180,
-      mode: wrap ? ('wrapped' as const) : ('planar' as const),
-      planarSpan,
-      wrappedSpan
-    };
-  };
-
-  /** True if the extent is plausibly lon/lat degrees (a projected CRS or 0-360 grid can't be compared). */
-  const looksLikeDegrees = ([west, south, east, north]: Bbox) =>
-    west >= -180 && east <= 180 && south >= -90 && north <= 90;
-
-  /**
-   * Creates the chosen projection fitted to WIDTH, plus the SVG height that fits the result.
-   * Returns undefined (after logging why) if there's nothing finite to fit to.
-   */
-  const fitProjection = (id: ProjectionId, collection: FeatureCollection, world: boolean) => {
-    const { points, skipped } = collectPoints(collection);
-    if (skipped) warn('skipped non-finite vertices', { skipped });
-    if (!points.length) {
-      warn('nothing to fit: no finite vertices', { projection: id });
-      return undefined;
-    }
-
-    // The data's own extent, used for diagnostics (and for fitting unless "whole world" is on).
-    const extent = extentOf(points);
-
-    // "Whole world": a fixed frame, centred on Greenwich, however much of the globe the (possibly cropped)
-    // bands cover. Without it the frame follows the data, so a crop that drops Antarctica would zoom the map.
-    const { centre: centreLon, mode: centreMode, planarSpan, wrappedSpan } = world
-      ? { centre: 0, mode: 'world' as const, planarSpan: 360, wrappedSpan: 360 }
-      : centreLongitude(points);
-
-    let fitPoints: number[][];
-    if (world) {
-      fitPoints = worldOutline(PROJECTION_BUILDERS[id].worldLatitudes ?? [-90, 90]);
-    } else {
-      fitPoints = [...points];
-      // Pad degenerate extents (one point, a straight N-S or E-W line) so the fit has something to scale to.
-      if (extent.east - extent.west < MIN_SPAN || extent.north - extent.south < MIN_SPAN) {
-        const lat = (extent.north + extent.south) / 2;
-        fitPoints.push([centreLon - MIN_SPAN / 2, lat - MIN_SPAN / 2], [centreLon + MIN_SPAN / 2, lat + MIN_SPAN / 2]);
-        warn('degenerate extent padded', extent);
-      }
-    }
-    const target: MultiPoint = { type: 'MultiPoint', coordinates: fitPoints };
-
-    // Fresh projection each time: fit* mutates it. fitWidth scales to WIDTH and pins the top of
-    // the shape to y=0, so the bottom edge is the height we need.
-    const projection = PROJECTION_BUILDERS[id].create(centreLon).fitWidth(WIDTH, target);
-    const [[x0, y0], [x1, y1]] = geoPath(projection).bounds(target);
-    const height = Math.ceil(y1);
-
-    log('fit', {
-      projection: id,
-      wholeWorld: world,
-      vertices: points.length,
-      extent,
-      centreLon,
-      centreMode,
-      lonSpan: { planar: planarSpan, wrapped: wrappedSpan },
-      scale: projection.scale(),
-      translate: projection.translate(),
-      projectedBounds: [
-        [x0, y0],
-        [x1, y1]
-      ],
-      height
-    });
-
-    if (!Number.isFinite(projection.scale()) || !Number.isFinite(height)) {
-      warn('fit produced a non-finite projection; falling back to the default height', { projection: id, extent });
-      return undefined;
-    }
-    return { projection, height: Math.max(1, height), extent };
-  };
-
-  /** Projected paths plus the SVG height that fits them at WIDTH, so the aspect ratio comes from the data. */
-  const layout = $derived.by(() => {
-    const fallback = { height: WIDTH * 0.75, paths: [] };
-    if (!bands?.features.length) return fallback;
-    const started = performance.now();
-    const clamp = !!PROJECTION_BUILDERS[projectionId].clampLatitudes;
-
-    // Prepare the geometry: drop degenerate polygons, fix winding, clamp latitudes if the projection needs it.
-    const stats = { dropped: 0 };
-    const geometryTypes: Record<string, number> = {};
-    const features: Feature[] = [];
-    for (const f of bands.features) {
-      const g = f.geometry;
-      geometryTypes[g?.type ?? 'none'] = (geometryTypes[g?.type ?? 'none'] ?? 0) + 1;
-      let geometry: Geometry = g;
-      if (g?.type === 'Polygon') {
-        const polygon = preparePolygon(g.coordinates, stats);
-        if (!polygon) continue;
-        geometry = { ...g, coordinates: polygon };
-      } else if (g?.type === 'MultiPolygon') {
-        const polygons = g.coordinates.map((p) => preparePolygon(p, stats)).filter((p): p is number[][][] => !!p);
-        if (!polygons.length) continue;
-        geometry = { ...g, coordinates: polygons };
-      }
-      if (clamp && geometry && 'coordinates' in geometry) {
-        geometry = { ...geometry, coordinates: clampLatitudes(geometry.coordinates) } as Geometry;
-      }
-      features.push({ ...f, geometry } as Feature);
-    }
-    const collection: FeatureCollection = { type: 'FeatureCollection', features };
-    log('layout input', {
-      projection: projectionId,
-      received: bands.features.length,
-      drawn: features.length,
-      droppedPolygons: stats.dropped,
-      geometryTypes
-    });
-    if (!features.length) return fallback;
-
-    // Spherical sanity check (diagnostic only; the fit doesn't depend on it). A polygon covering more than
-    // a hemisphere is almost certainly a ring d3 reads as inverted, which draws as "the whole world minus this".
-    const inverted = features.flatMap((f, i) => (geoArea(f) > 2 * Math.PI ? [i] : []));
-    if (inverted.length) warn('features covering more than a hemisphere (likely inverted winding)', { count: inverted.length, firstIndexes: inverted.slice(0, 10) });
-
-    const fit = fitProjection(projectionId, collection, wholeWorld);
-    if (!fit) return fallback;
-
-    // Diagnostic: bands should sit inside the raster. If they don't, the geometry is wrong before it reaches this
-    // component (createIsobands / clipTo), and no amount of fitting here will make the map look right.
-    const bbox = dataBbox;
-    if (bbox && looksLikeDegrees(bbox)) {
-      const [west, south, east, north] = bbox;
-      const tol = 1;
-      const { extent } = fit;
-      if (extent.west < west - tol || extent.east > east + tol || extent.south < south - tol || extent.north > north + tol) {
-        warn('band geometry extends beyond the raster: the clip/isoband output is oversized', { bandExtent: extent, rasterBbox: bbox });
-      }
-    }
-
-    const toPath = geoPath(fit.projection);
-    let empty = 0;
-    const paths = collection.features.map((feature) => {
-      const p = feature.properties ?? {};
-      const d = toPath(feature) ?? '';
-      if (!d) empty++;
-      return {
-        d,
-        fill: typeof p.fill === 'string' ? p.fill : '#555555',
-        fillOpacity: Number.isFinite(Number(p['fill-opacity'])) ? Number(p['fill-opacity']) : 0.6,
-        stroke: typeof p.stroke === 'string' ? p.stroke : 'none',
-        strokeOpacity: Number.isFinite(Number(p['stroke-opacity'])) ? Number(p['stroke-opacity']) : 1,
-        strokeWidth: Number.isFinite(Number(p['stroke-width'])) ? Number(p['stroke-width']) : 2
-      };
-    });
-    if (empty) warn('features that produced an empty path', { empty, of: paths.length });
-    log('layout done', { paths: paths.length, height: fit.height, ms: Math.round(performance.now() - started) });
-    return { height: fit.height, paths };
-  });
-
-  const paths = $derived(layout.paths);
-  const height = $derived(layout.height);
-
-  // ---------------------------------------------------------------------------
   // Exports
   // ---------------------------------------------------------------------------
-
-  const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-
-  const buildSvg = (width = WIDTH) => {
-    const h = Math.round((width * height) / WIDTH);
-    const body = paths
-      .map(
-        (p) =>
-          `<path d="${p.d}" fill="${escapeAttr(p.fill)}" fill-opacity="${p.fillOpacity}" stroke="${escapeAttr(p.stroke)}" stroke-opacity="${p.strokeOpacity}" stroke-width="${p.strokeWidth}"/>`
-      )
-      .join('\n');
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${height}" width="${width}" height="${h}">\n${body}\n</svg>`;
-  };
 
   const download = (blob: Blob, filename: string) => {
     const href = URL.createObjectURL(blob);
@@ -1027,17 +531,22 @@
     download(new Blob([JSON.stringify(bands)], { type: 'application/geo+json' }), `${baseName}.geojson`);
   };
 
+  /** Built on demand for exports; the preview lays itself out inside IsobandMap. */
+  const layoutForExport = () => buildLayout({ bands, projection: projectionId, wholeWorld, rasterBbox: dataBbox });
+
   const exportSvg = () => {
-    if (!paths.length) return;
-    download(new Blob([buildSvg()], { type: 'image/svg+xml' }), `${baseName}.svg`);
+    const layout = layoutForExport();
+    if (!layout) return;
+    download(new Blob([buildSvg(layout)], { type: 'image/svg+xml' }), `${baseName}.svg`);
   };
 
   const exportPng = async () => {
-    if (!paths.length) return;
+    const layout = layoutForExport();
+    if (!layout) return;
     exportError = undefined;
     const w = EXPORT_WIDTH;
-    const h = Math.round((w * height) / WIDTH);
-    const svgBlob = new Blob([buildSvg(w)], { type: 'image/svg+xml' });
+    const h = Math.round((w * layout.height) / layout.width);
+    const svgBlob = new Blob([buildSvg(layout, w)], { type: 'image/svg+xml' });
     const href = URL.createObjectURL(svgBlob);
     try {
       const img = new Image();
@@ -1057,7 +566,7 @@
     }
   };
 
-  const hasOutput = $derived(paths.length > 0);
+  const hasOutput = $derived(!!bands?.features.length);
 
   /** What to say when there's nothing to draw and nothing is loading. */
   const idleMessage = $derived.by(() => {
@@ -1081,18 +590,7 @@
     <Loader>Creating isobands</Loader>
   {:else if hasOutput}
     <div class="preview" aria-busy={generating}>
-      <svg viewBox="0 0 {WIDTH} {height}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Isobands preview">
-        {#each paths as path}
-          <path
-            d={path.d}
-            fill={path.fill}
-            fill-opacity={path.fillOpacity}
-            stroke={path.stroke}
-            stroke-opacity={path.strokeOpacity}
-            stroke-width={path.strokeWidth}
-          />
-        {/each}
-      </svg>
+      <IsobandMap {bands} projection={projectionId} {wholeWorld} rasterBbox={dataBbox} />
       {#if generating}<span class="updating">Updating…</span>{/if}
     </div>
   {:else}
@@ -1118,13 +616,6 @@
         {/each}
       </select>
     </div>
-    {#if preset}
-      <p>
-        <small>
-          Uses a fixed range of {preset.min} to {preset.max} in steps of {preset.interval}, with its own colours.
-        </small>
-      </p>
-    {/if}
   </fieldset>
 
   {#if !preset}
@@ -1250,8 +741,6 @@
     >
       <input type="checkbox" bind:checked={$settings.wholeWorld} /> Whole world
     </label>
-    <p><small>Set from the data's extent when a file loads: Australian data keeps the conic projection, anything else starts on Equal Earth.</small></p>
-    <p><small>Whole world fits the map to the full globe, centred on Greenwich. Leave it off to fit the map to the data.</small></p>
   </fieldset>
 
   <fieldset>
@@ -1261,11 +750,9 @@
       <button type="button" disabled={!hasOutput} onclick={exportSvg}>SVG</button>
       <button type="button" disabled={!hasOutput} onclick={exportPng}>PNG</button>
     </ButtonGroup>
-    <p><small>GeoJSON uses simplestyle properties, ready for Globey.</small></p>
     {#if exportError}<p role="alert"><small>{exportError}</small></p>{/if}
   </fieldset>
 {/snippet}
-BUILDER YO
   <BuilderFrame {Viz} {Sidebar} />
 
 <style>
@@ -1284,9 +771,8 @@ BUILDER YO
     overflow: hidden;
   }
 
-  .preview svg {
-    display: block;
-    width: 100%;
+  .preview :global(figure),
+  .preview :global(.map) {
     height: 100%;
     max-height: 100dvh;
   }
