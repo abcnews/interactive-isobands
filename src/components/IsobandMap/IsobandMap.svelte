@@ -26,6 +26,10 @@
      * Falls back to the library's default sequential scale when omitted.
      */
     palette?: (value: number) => string;
+    /** Band thresholds: min, min + interval, ... max. Give all three together; omit for one band per raster value. */
+    min?: number;
+    max?: number;
+    interval?: number;
   }
 
   const str = (v: unknown, fallback: string) => (typeof v === 'string' && v ? v : fallback);
@@ -54,7 +58,10 @@
     aspectRatio = 4 / 3,
     rootMargin = '600px',
     clipTo,
-    palette
+    palette,
+    min,
+    max,
+    interval
   }: Props = $props();
  
   const WIDTH = 1000;
@@ -81,15 +88,25 @@
     bands = undefined;
     error = undefined;
  
-    fetch(url, { signal: controller.signal })
+    fetch(url, { signal: controller.signal})
       .then((response) => {
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        console.log('response', response.status)
+        // Anything other than 200 is a failure: 3xx that wasn't followed, 4xx, 5xx,
+        // and 204/206 which succeed per `response.ok` but don't carry a full GeoTIFF.
+        if (response.status !== 200) {
+          const reason = response.statusText ? ` ${response.statusText}` : '';
+          throw new Error(`server responded with ${response.status}${reason}`);
+        }
         return response.arrayBuffer();
       })
-      .then((data) => (buffer = data))
+      .then((data) => {
+        if (!data.byteLength) throw new Error('the response was empty');
+        buffer = data;
+      })
       .catch((e) => {
         if (controller.signal.aborted) return;
-        error = `Could not load ${url}: ${e instanceof Error ? e.message : e}`;
+        error = `Could not load map data: ${e instanceof Error ? e.message : e}`;
+        console.error('IsobandMap fetch failed', url, e);
       });
  
     return () => controller.abort();
@@ -101,14 +118,16 @@
     const data = buffer;
     const boundary = clipTo;
     const colors = palette;
+    const range = { min, max, interval };
     let stale = false;
  
-    createIsobands(data, { clipTo: boundary, palette: colors })
+    createIsobands(data, { clipTo: boundary, palette: colors, ...range })
       .then((result) => {
         if (!stale) bands = result;
       })
       .catch((e) => {
         if (!stale) error = `Could not create isobands: ${e instanceof Error ? e.message : e}`;
+        console.error('IsobandMap render failed', e);
       });
  
     return () => {
@@ -151,7 +170,9 @@
     <text x="50%" y="50%" text-anchor="middle" dominant-baseline="central">{name}</text>
   </svg>
  
-  {#if !paths.length}
+  {#if error}
+    <div class="map message" style:aspect-ratio={aspectRatio} role="alert">{error}</div>
+  {:else if !paths.length}
     <div class="map" style:aspect-ratio={aspectRatio}></div>
   {:else}
     <svg
@@ -171,9 +192,6 @@
           stroke-width={path.strokeWidth}
         />
       {/each}
-      {#if error}
-        <text x="50%" y="50%" text-anchor="middle" class="error">{error}</text>
-      {/if}
     </svg>
   {/if}
 </figure>
@@ -203,9 +221,15 @@
     height: auto;
   }
  
-  .error {
-    fill: currentColor;
-    font-size: 24px;
+  .message {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 1em;
+    text-align: center;
+    opacity: 0.7;
+    overflow-wrap: anywhere;
   }
 
   @keyframes fadeIn{

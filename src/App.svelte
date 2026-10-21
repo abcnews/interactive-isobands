@@ -11,12 +11,30 @@ import { ColourMode, SequentialPalette, getSequentialSteppedPalette } from '@abc
 
   const palette = (value: number): string => colours[thresholds.filter((t) => value >= t).length];
 
+const logPalette = val => {
+  console.log({val});
+  return palette(val);
+}
+
+const forecasts = Array.from({length:6}).map((_,i) => {
+  const targetDate = new Date(Date.now() + i*1000*60*60*24);
+  const ymd = [
+    targetDate.getFullYear(),
+    targetDate.getMonth()+1,
+    targetDate.getDate()
+  ].map(val => String(val).padStart(2,'0')).join('-')
+
+  return ({
+  url: `https://abcnewsdata.sgp1.digitaloceanspaces.com/service-ecmwf-gridded-forecasts/ifs-t2m/${ymd}/aus-banded.tiff`,
+  ymd: ymd
+})
+})
 </script>
 
 <main>
-{#each Array.from({length:6})}
+{#each forecasts as forecast}
   <div style="width:300px;position:relative;">
-  <IsobandMap name="Australia" clipTo={ausClip} url="/aus-banded.tiff" palette={palette} />
+  <IsobandMap name={forecast.ymd} clipTo={ausClip} url={forecast.url} palette={logPalette} />
   </div>
 {/each}
 </main>

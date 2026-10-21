@@ -41,6 +41,20 @@ export type IsoBandOptions = {
    * (sequential red, light mode) spanning the raster's lowest to highest class value.
    */
   readonly palette?: BandPalette;
+  /**
+   * Threshold mode. Give all three of `min`, `max` and `interval` to cut the raster into bands
+   * at min, min + interval, ... max, instead of making one band per distinct raster value
+   * (the default, which suits already-classified rasters but gives hundreds of bands on continuous data).
+   * Each band's class value is its midpoint, and its `lower` and `upper` bounds are added as properties.
+   */
+  readonly min?: number;
+  readonly max?: number;
+  readonly interval?: number;
+  /**
+   * Threshold mode only: what to do with pixels below `min` or above `max`.
+   * 'drop' (default) leaves them out of the output; 'clamp' folds them into the first or last band.
+   */
+  readonly outOfRange?: 'drop' | 'clamp';
 };
 
 /** d3-contour output: polygons as [polygon][ring][point] in grid space. */
@@ -105,6 +119,36 @@ const createBreaksFromClassValues = (classValues: readonly number[]): readonly n
   return [first - lowerPad, ...midpoints, last + upperPad];
 };
 
+/** Sanity limit on the number of bands in threshold mode, so a tiny interval can't hang the browser. */
+const MAX_THRESHOLD_BANDS = 500;
+
+/** Strips floating point noise (0.30000000000000004 -> 0.3). */
+const tidy = (n: number): number => Number(n.toPrecision(12));
+
+/**
+ * Builds breaks at min, min + interval, ... max (the last band is narrower if the range isn't a
+ * whole number of intervals), plus one class value per band at its midpoint. Midpoints keep bands
+ * either side of a divergent palette's neutral value symmetrical.
+ */
+const createThresholdBands = (
+  min: number,
+  max: number,
+  interval: number
+): { breaks: readonly number[]; classValues: readonly number[] } => {
+  if (![min, max, interval].every(Number.isFinite)) throw new Error('min, max and interval must be finite numbers');
+  if (max <= min) throw new Error('max must be greater than min');
+  if (interval <= 0) throw new Error('interval must be greater than zero');
+
+  const count = Math.ceil((max - min) / interval - 1e-9);
+  if (count > MAX_THRESHOLD_BANDS) {
+    throw new Error(`That range and interval give ${count} bands (limit ${MAX_THRESHOLD_BANDS})`);
+  }
+
+  const breaks = Array.from({ length: count + 1 }, (_, i) => (i === count ? max : tidy(min + i * interval)));
+  const classValues = breaks.slice(1).map((upper, i) => tidy((breaks[i] + upper) / 2));
+  return { breaks, classValues };
+};
+
 /** Provides one properties object per band so each output polygon records its class value. */
 const createBreaksProperties = (
   classValues: readonly number[],
@@ -119,12 +163,19 @@ const createNoDataSentinel = (breaks: readonly number[]): number => breaks[0] - 
 /** Scaling factor that snaps output coordinates to the configured decimal places. */
 const COORDINATE_FACTOR = 10 ** COORDINATE_DECIMAL_PLACES;
 
-/** Copies the raster into the flat row-major array d3-contour expects, swapping nodata for the sentinel. Yields between chunks. */
-const rasterToFlatArray = async (grid: RasterGrid, sentinel: number): Promise<Float64Array> => {
+/**
+ * Copies the raster into the flat row-major array d3-contour expects, swapping nodata for the sentinel.
+ * With `clampTo`, valid values are pulled into that [low, high] range. Yields between chunks.
+ */
+const rasterToFlatArray = async (
+  grid: RasterGrid,
+  sentinel: number,
+  clampTo?: readonly [low: number, high: number]
+): Promise<Float64Array> => {
   const out = new Float64Array(grid.width * grid.height);
   for (let i = 0; i < out.length; i++) {
     const v = grid.values[i];
-    out[i] = isNoData(v, grid.noData) ? sentinel : v;
+    out[i] = isNoData(v, grid.noData) ? sentinel : clampTo ? Math.min(clampTo[1], Math.max(clampTo[0], v)) : v;
     if (i % CHUNK_SIZE === CHUNK_SIZE - 1) await yieldToMain();
   }
   return out;
@@ -196,17 +247,39 @@ const removeEmptyBands = (collection: FeatureCollection<MultiPolygon>): FeatureC
 /** Turns a classified GeoTIFF buffer into a FeatureCollection of one MultiPolygon isoband per colour class, styled with simplestyle properties. */
 export const createIsoBandsFromGeotiff = async (
   buffer: ArrayBuffer,
-  { propertyName = 'classValue', palette }: IsoBandOptions = {}
+  { propertyName = 'classValue', palette, min, max, interval, outOfRange = 'drop' }: IsoBandOptions = {}
 ): Promise<FeatureCollection<MultiPolygon>> => {
+  const given = [min, max, interval].filter(v => v !== undefined).length;
+  if (given !== 0 && given !== 3) throw new Error('min, max and interval must be given together');
+
+  // Validate the options before doing any heavy work.
+  const thresholdBands = given === 3 ? createThresholdBands(min!, max!, interval!) : undefined;
+
   const image = await loadFirstImage(buffer);
   const grid = await readRasterGrid(image);
   await yieldToMain();
 
-  const classValues = await extractUniqueClassValues(grid);
-  const breaks = createBreaksFromClassValues(classValues);
-  const noDataSentinel = createNoDataSentinel(breaks);
+  // Threshold mode skips the full pass that collects every distinct raster value.
+  const classValues = thresholdBands?.classValues ?? (await extractUniqueClassValues(grid));
+  const breaks = thresholdBands?.breaks ?? createBreaksFromClassValues(classValues);
 
-  const flat = await rasterToFlatArray(grid, noDataSentinel);
+  // Nodata sentinel. d3-contour interpolates between a pixel and its neighbour, so in threshold mode
+  // (where breaks sit at arbitrary values) a sentinel only just below min would drag the upper
+  // breaks away from the nodata edge and leave slivers of the lower bands along it. Far below
+  // keeps every break's crossing right up against the edge.
+  const noDataSentinel = thresholdBands
+    ? breaks[0] - 1000 * (breaks[breaks.length - 1] - breaks[0])
+    : createNoDataSentinel(breaks);
+
+  // Clamping pulls out-of-range values just inside the end bands. The epsilon keeps clamped pixels
+  // strictly inside [min, max) so they don't land on a break.
+  const epsilon = thresholdBands ? (breaks[breaks.length - 1] - breaks[0]) * 1e-9 : 0;
+  const clampTo =
+    thresholdBands && outOfRange === 'clamp'
+      ? ([breaks[0] + epsilon, breaks[breaks.length - 1] - epsilon] as const)
+      : undefined;
+
+  const flat = await rasterToFlatArray(grid, noDataSentinel, clampTo);
   await yieldToMain();
 
   // d3-contour yields cumulative regions (value >= threshold), one per lower break.
@@ -214,7 +287,10 @@ export const createIsoBandsFromGeotiff = async (
   // Contour one threshold at a time so we can yield between the heavy calls.
   const contourer = d3Contours().size([grid.width, grid.height]);
   const regionPaths: ClipperPath[][] = [];
-  for (const threshold of breaks.slice(0, classValues.length)) {
+  // In threshold mode pixels can sit above the top break, so that region is contoured too (it is
+  // what the top band is cut against). In class mode the top break is above every pixel.
+  const contourBreaks = thresholdBands ? breaks : breaks.slice(0, classValues.length);
+  for (const threshold of contourBreaks) {
     regionPaths.push(polygonsToClipperPaths(contourer.contour(flat, threshold).coordinates, grid));
     await yieldToMain();
   }
@@ -225,7 +301,10 @@ export const createIsoBandsFromGeotiff = async (
   for (let i = 0; i < classValues.length; i++) {
     features.push({
       type: 'Feature',
-      properties: { [propertyName]: classValues[i] },
+      properties: {
+        [propertyName]: classValues[i],
+        ...(thresholdBands ? { lower: breaks[i], upper: breaks[i + 1] } : {})
+      },
       geometry: {
         type: 'MultiPolygon',
         coordinates: pathsToPolygons([...regionPaths[i], ...(regionPaths[i + 1] ?? [])], COORDINATE_FACTOR)

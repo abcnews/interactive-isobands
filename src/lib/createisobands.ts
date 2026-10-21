@@ -7,6 +7,15 @@ export interface CreateIsobandsOptions {
   clipTo?: GeoJsonInput;
   /** Takes a band's class value and returns its colour. Defaults to a built-in sequential scale. */
   palette?: BandPalette;
+  /**
+   * Cut the raster into bands at min, min + interval, ... max. All three must be given together.
+   * Without them, one band is made per distinct raster value (suits classified rasters only).
+   */
+  min?: number;
+  max?: number;
+  interval?: number;
+  /** With min/max/interval: 'drop' (default) leaves pixels outside the range out; 'clamp' folds them into the end bands. */
+  outOfRange?: 'drop' | 'clamp';
   /** Print timing information to the console. Defaults to false. */
   debug?: boolean;
 }
@@ -25,12 +34,13 @@ const fetchArrayBuffer = async (url: string): Promise<ArrayBuffer> => {
  *
  * @param tiff - A URL to a GeoTIFF, or the GeoTIFF's bytes as an ArrayBuffer.
  * @param options - `clipTo` GeoJSON to clip to, `palette` (class value to colour) to control
- *   the simplestyle colours, and `debug` to log timings.
+ *   the simplestyle colours, `min`/`max`/`interval` (together) to band by threshold,
+ *   `outOfRange` to drop or clamp values outside min/max, and `debug` to log timings.
  * @returns The isobands as a GeoJSON FeatureCollection, styled with simplestyle properties.
  */
 export const createIsobands = async (
   tiff: string | URL | ArrayBuffer,
-  { clipTo, palette, debug = false }: CreateIsobandsOptions = {}
+  { clipTo, palette, min, max, interval, outOfRange, debug = false }: CreateIsobandsOptions = {}
 ): Promise<FeatureCollection> => {
   /** Runs a step, logging its duration only when debug is on. */
   const timed = async <T>(label: string, step: () => T | Promise<T>): Promise<T> => {
@@ -47,7 +57,9 @@ export const createIsobands = async (
 
   const buffer = tiff instanceof ArrayBuffer ? tiff : await timed('fetch tiff', () => fetchArrayBuffer(String(tiff)));
 
-  const bands = await timed('create isobands', () => createIsoBandsFromGeotiff(buffer, { palette }));
+  const bands = await timed('create isobands', () =>
+    createIsoBandsFromGeotiff(buffer, { palette, min, max, interval, outOfRange })
+  );
 
   const result = clipTo ? await timed('clip to boundary', () => fastClip(bands, clipTo)) : bands;
 
