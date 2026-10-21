@@ -2,7 +2,7 @@
   import ausMd from '../../aus-md.json';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import { DATA_BASE_URL, resolveDateRange } from '../../lib/forecastdates.ts';
-  import { summerHeatPalette } from '../../lib/palettes.ts';
+  import { colourScheme, createSummerHeatPalette } from '../../lib/palettes.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
   import ABCHeading from '../ABCHeading/ABCHeading.svelte';
   import IsobandMapFetch from '../IsobandMap/IsobandMapFetch.svelte';
@@ -23,6 +23,9 @@
   const isShown = (item: 'TITLE' | 'DATES' | 'ATTRIBUTION') => !visible || visible.has(item);
 
   const ausClip = ausMd as GeoJsonInput;
+
+  /** Follows the parent's light/dark scheme; a new palette re-colours the bands. */
+  const palette = $derived(createSummerHeatPalette(colourScheme.mode));
 
   /** Default days shown, as 3 columns x 2 rows on desktop and 2 columns x 3 rows on mobile. */
   const DEFAULT_DAYS = 6;
@@ -54,7 +57,7 @@
       projection="australia"
       clipTo={ausClip}
       url={forecast.url}
-      palette={summerHeatPalette}
+      {palette}
     />
   {/snippet}
 

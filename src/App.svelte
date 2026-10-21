@@ -15,3 +15,10 @@
     <p>Unknown viz: {viz}</p>
   {/if}
 </TypographyProvider>
+
+<style>
+  /* The iframe must show the parent page through it. */
+  :global(html, body) {
+    background: transparent;
+  }
+</style>
