@@ -8,7 +8,7 @@
     bandCount as countBands,
     buildLayout,
     buildSvg,
-    defaultProjectionFor,
+    centreLongitude,
     inspectTiff,
     invertShape,
     rangeFor,
@@ -378,7 +378,10 @@
         else applyDataRange(range);
         if (keepStoredProjection) keepStoredProjection = false;
         else {
-          const next = defaultProjectionFor(range.bbox);
+          // Data entirely inside this lon/lat box (padded so offshore grids qualify) keeps the Australian conic.
+          const [west, south, east, north] = range.bbox ?? [NaN, NaN, NaN, NaN];
+          const aroundAustralia = west >= 100 && east <= 175 && south >= -55 && north <= 0;
+          const next: ProjectionId = aroundAustralia ? 'australia' : 'equal-earth';
           log('projection', { bbox: range.bbox, projection: next });
           settings.update((s) => ({ ...s, projection: next }));
         }
@@ -531,8 +534,11 @@
     download(new Blob([JSON.stringify(bands)], { type: 'application/geo+json' }), `${baseName}.geojson`);
   };
 
+  /** The map's centre longitude: the data's own centre, or Greenwich for a whole-world frame. */
+  const centreLon = $derived(!bands || wholeWorld ? 0 : centreLongitude(bands));
+
   /** Built on demand for exports; the preview lays itself out inside IsobandMap. */
-  const layoutForExport = () => buildLayout({ bands, projection: projectionId, wholeWorld, rasterBbox: dataBbox });
+  const layoutForExport = () => buildLayout({ bands, projection: projectionId, wholeWorld, centreLon });
 
   const exportSvg = () => {
     const layout = layoutForExport();
@@ -590,7 +596,7 @@
     <Loader>Creating isobands</Loader>
   {:else if hasOutput}
     <div class="preview" aria-busy={generating}>
-      <IsobandMap {bands} projection={projectionId} {wholeWorld} rasterBbox={dataBbox} />
+      <IsobandMap {bands} projection={projectionId} {wholeWorld} {centreLon} />
       {#if generating}<span class="updating">Updating…</span>{/if}
     </div>
   {:else}

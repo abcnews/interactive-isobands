@@ -10,7 +10,7 @@
     url: string;
     /** Alt text describing the map for screen readers. */
     alt?: string;
-    projection?: ProjectionId;
+    projection: ProjectionId;
     /** How far outside the viewport (CSS margin syntax) the render starts. */
     rootMargin?: string;
     /** Optional GeoJSON boundary to clip the bands to. */

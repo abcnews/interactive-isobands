@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { FeatureCollection } from 'geojson';
-  import { buildLayout, type Bbox, type ProjectionId } from '../../lib/geo.ts';
+  import { buildLayout, type ProjectionId } from '../../lib/geo.ts';
 
   interface Props {
     /** Isobands to draw, with simplestyle properties. Draws an empty placeholder until supplied. */
@@ -9,11 +9,11 @@
     alt?: string;
     /** Shown in place of the map. */
     error?: string;
-    projection?: ProjectionId;
+    projection: ProjectionId;
     /** Fit the map to the whole globe instead of the bands' extent. */
     wholeWorld?: boolean;
-    /** The source raster's extent, only used to warn when the bands fall outside it. */
-    rasterBbox?: Bbox;
+    /** Longitude to centre the map on, for projections that rotate. Defaults to Greenwich. */
+    centreLon?: number;
     /** Width / height of the space reserved while there is nothing to draw. */
     placeholderRatio?: number;
   }
@@ -22,14 +22,14 @@
     bands,
     alt = 'Isobands map',
     error,
-    projection = 'australia',
+    projection,
     wholeWorld = false,
-    rasterBbox,
+    centreLon,
     placeholderRatio = 4 / 3
   }: Props = $props();
 
   // Height comes from the data's projected shape, so the aspect ratio is never fixed.
-  const layout = $derived(buildLayout({ bands, projection, wholeWorld, rasterBbox }));
+  const layout = $derived(buildLayout({ bands, projection, wholeWorld, centreLon }));
 </script>
 
 <figure aria-busy={!layout && !error}>

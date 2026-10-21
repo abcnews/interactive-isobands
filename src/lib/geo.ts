@@ -1,13 +1,23 @@
-import { geoArea, geoConicConformal, geoEqualEarth, geoMercator, geoPath, type GeoProjection } from 'd3-geo';
+import { area } from '@turf/area';
+import { bbox } from '@turf/bbox';
+import { bboxPolygon } from '@turf/bbox-polygon';
+import { flatten } from '@turf/flatten';
+import { mask } from '@turf/mask';
+import { coordAll } from '@turf/meta';
+import { rewind } from '@turf/rewind';
+import {
+  geoArea,
+  geoBounds,
+  geoConicConformal,
+  geoEqualEarth,
+  geoGraticule,
+  geoMercator,
+  geoPath,
+  type GeoProjection
+} from 'd3-geo';
 import { fromArrayBuffer } from 'geotiff';
-import type { Feature, FeatureCollection, GeoJsonProperties, Geometry, MultiPoint } from 'geojson';
+import type { Feature, FeatureCollection, GeoJsonProperties, Geometry, MultiPoint, Polygon } from 'geojson';
 import type { GeoJsonInput } from './fastclip.ts';
-
-/* ---- Logging ---- */
-
-// Stringified so the details can be copied out of the console.
-const log = (message: string, details: unknown = {}) => console.debug(`[isobands] ${message} ${JSON.stringify(details)}`);
-const warn = (message: string, details: unknown = {}) => console.warn(`[isobands] ${message} ${JSON.stringify(details)}`);
 
 /* ---- Constants ---- */
 
@@ -23,16 +33,8 @@ const TARGET_BANDS = 10;
 const MERCATOR_MAX_LAT = 85.0511;
 /** Smallest lon/lat span (degrees) we'll fit to, so a single point or a line doesn't give an infinite scale. */
 const MIN_SPAN = 0.01;
-/** Spacing (degrees) of the sample points along the world's edge. */
-const WORLD_STEP = 5;
 /** Longest span (degrees) of a region that is worth centring across the antimeridian. */
 const MAX_WRAPPED_SPAN = 180;
-
-/**
- * Data that sits entirely inside this lon/lat box (degrees) counts as "around Australia" and keeps
- * the Australian conic projection. Padded beyond the continent so offshore grids still qualify.
- */
-export const AUSTRALIA_REGION = { west: 100, south: -55, east: 175, north: 0 };
 
 /** Bundled boundaries, served from /public (paths are relative to the builder page). */
 export const BUILT_IN_SHAPES = [
@@ -50,8 +52,8 @@ export const PROJECTIONS = [
 export type ProjectionId = (typeof PROJECTIONS)[number]['id'];
 export const PROJECTION_IDS: readonly ProjectionId[] = PROJECTIONS.map((p) => p.id);
 
+/** [west, south, east, north] in lon/lat degrees, the same order as turf's bbox. */
 export type Bbox = [west: number, south: number, east: number, north: number];
-type Extent = { west: number; south: number; east: number; north: number };
 
 /* ---- Numbers and bands ---- */
 
@@ -91,7 +93,6 @@ export const inspectTiff = async (buffer: ArrayBuffer): Promise<Inspection> => {
   const tiff = await fromArrayBuffer(buffer);
   const image = await tiff.getImage();
   const noData = image.getGDALNoData();
-  log('geotiff', { width: image.getWidth(), height: image.getHeight(), bands: image.getSamplesPerPixel(), noData });
   const [raster] = (await image.readRasters({ samples: [0] })) as unknown as ArrayLike<number>[];
 
   const stride = Math.max(1, Math.ceil(raster.length / SAMPLE_SIZE));
@@ -106,13 +107,16 @@ export const inspectTiff = async (buffer: ArrayBuffer): Promise<Inspection> => {
   );
   if (min > max) throw new Error('The GeoTIFF contains no valid values in its first band.');
 
-  // Geographic extent, used to choose a projection. Not fatal if the file has no georeferencing.
+  // Geographic extent, used to choose a projection and frame an inverted crop. Only kept if it is plausibly
+  // lon/lat degrees: a projected CRS (metres) or a 0-360 grid has the same shape but can't be compared with
+  // the Australian region or the world frame, so it is treated the same as a file with no georeferencing.
   const bbox = (() => {
     try {
       const [x1, y1, x2, y2] = image.getBoundingBox();
-      return [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)] as Bbox;
-    } catch (e) {
-      log('no bounding box', { error: String(e) });
+      const [west, south, east, north] = [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
+      const isDegrees = west >= -180 && east <= 180 && south >= -90 && north <= 90;
+      return isDegrees ? ([west, south, east, north] as Bbox) : undefined;
+    } catch {
       return undefined;
     }
   })();
@@ -121,115 +125,63 @@ export const inspectTiff = async (buffer: ArrayBuffer): Promise<Inspection> => {
 
 /* ---- Polygon geometry ---- */
 
-/** Shoelace sum over lon/lat: > 0 means clockwise (y up). */
-export const area = (ring: number[][]) =>
-  ring.reduce((sum, [x, y], i) => sum + (ring[(i + 1) % ring.length][0] - x) * (ring[(i + 1) % ring.length][1] + y), 0);
-
 /**
  * d3-geo is spherical and wants exterior rings clockwise, holes anticlockwise (the opposite of the GeoJSON spec).
  * Wrong winding makes d3 treat a polygon as "the whole globe minus this shape".
  */
-export const rewind = (polygon: number[][][]) =>
-  polygon.map((ring, i) => ((area(ring) > 0) === (i === 0) ? ring : [...ring].reverse()));
+const windForD3 = (polygon: number[][][]): number[][][] =>
+  (rewind({ type: 'Polygon', coordinates: polygon } as Polygon, { reverse: true }) as Polygon).coordinates;
 
-/** Returns the ring wound clockwise or anticlockwise (y up), reversing it if needed. */
-export const orient = (ring: number[][], clockwise: boolean) => ((area(ring) > 0) === clockwise ? ring : [...ring].reverse());
-
-/** Sphere area (steradians) of a lon/lat ring as an equal-area cylindrical shape: planar area in (lon, sin lat). */
-const cylindricalArea = (ring: number[][]) =>
-  Math.abs(
-    ring.reduce((sum, [lon, lat], i) => {
-      const [nextLon, nextLat] = ring[(i + 1) % ring.length];
-      return sum + ((nextLon - lon) * (Math.sin((lat * Math.PI) / 180) + Math.sin((nextLat * Math.PI) / 180))) / 2;
-    }, 0) *
-      (Math.PI / 180)
-  );
+/** The radius turf's `area` assumes, used to turn its square metres into steradians. */
+const EARTH_RADIUS = 6378137;
 
 const spanOf = (ring: number[][]) => Math.max(...ring.map((p) => p[0])) - Math.min(...ring.map((p) => p[0]));
 
 /**
- * Winds a polygon for d3-geo. Planar winding (`rewind`) is right for anything compact, but a ring that
+ * Winds a polygon for d3-geo. Planar winding (`windForD3`) is right for anything compact, but a ring that
  * wraps the globe (an ocean with the continents cut out, a strip circling Antarctica) is ambiguous:
  * in lon/lat the same ring can enclose either side, and d3 fills the wrong one, painting the whole map.
  * For wide polygons we measure d3's spherical area against the area the lon/lat shape should have,
  * and flip the winding if the complement is the closer match.
  */
 const windForSphere = (polygon: number[][][]): number[][][] => {
-  const wound = rewind(polygon);
+  const wound = windForD3(polygon);
   if (spanOf(polygon[0]) < 180) return wound;
 
-  const expected = polygon.reduce((sum, ring, i) => sum + (i === 0 ? 1 : -1) * cylindricalArea(ring), 0);
+  // turf measures the lon/lat shape as drawn (holes subtracted, always the small side), which is what d3 should match.
+  const expected = area({ type: 'Polygon', coordinates: polygon }) / EARTH_RADIUS ** 2;
   const measured = geoArea({ type: 'Polygon', coordinates: wound });
   const flipped = 4 * Math.PI - measured;
   return Math.abs(measured - expected) <= Math.abs(flipped - expected) ? wound : wound.map((ring) => [...ring].reverse());
 };
 
 /**
- * Exterior rings smaller than this (square degrees, roughly 12 km²) are dropped as clipping debris. Where
+ * Exterior rings smaller than this (square metres, roughly 12 km²) are dropped as clipping debris. Where
  * two shapes meet, clippers leave near-collinear slivers; their planar winding is meaningless on the sphere
  * (great-circle edges bow the other way), so d3 reads them as "the whole globe minus this" and fills the map.
  */
-const MIN_POLYGON_AREA = 1e-3;
+const MIN_POLYGON_AREA = 12e6;
 
 /**
  * Cleans one polygon for drawing: drops degenerate rings (fewer than 4 positions can't enclose
  * anything; clippers sometimes emit them) and slivers, and fixes winding. Returns undefined if no usable exterior is left.
  */
 export const preparePolygon = (polygon: number[][][]): number[][][] | undefined => {
-  if (!(polygon[0]?.length >= 4) || Math.abs(area(polygon[0])) / 2 < MIN_POLYGON_AREA) return undefined;
+  if (!(polygon[0]?.length >= 4) || area({ type: 'Polygon', coordinates: [polygon[0]] }) < MIN_POLYGON_AREA) return undefined;
   return windForSphere(polygon.filter((ring, i) => i === 0 || ring.length >= 4));
 };
 
 /** Collects every polygon ([exterior, ...holes]) from any GeoJSON input: collections, features, geometries. */
-export const collectPolygons = (input: any): number[][][][] => {
+export const collectPolygons = (input: unknown): number[][][][] => {
   if (!input) return [];
-  switch (input.type) {
-    case 'FeatureCollection':
-      return (input.features ?? []).flatMap(collectPolygons);
-    case 'Feature':
-      return collectPolygons(input.geometry);
-    case 'GeometryCollection':
-      return (input.geometries ?? []).flatMap(collectPolygons);
-    case 'Polygon':
-      return [input.coordinates];
-    case 'MultiPolygon':
-      return input.coordinates;
-    default:
-      return [];
-  }
+  return flatten(input as Parameters<typeof flatten>[0]).features.flatMap((feature) =>
+    feature.geometry?.type === 'Polygon' ? [feature.geometry.coordinates] : []
+  );
 };
 
 /** Clamps every latitude in a coordinate array to Web Mercator's limit. Vertices at +/-90 otherwise project to Infinity/NaN. */
 const clampLatitudes = (c: any): any =>
   typeof c[0] === 'number' ? [c[0], Math.max(-MERCATOR_MAX_LAT, Math.min(MERCATOR_MAX_LAT, c[1])), ...c.slice(2)] : c.map(clampLatitudes);
-
-/** Flattens every finite [lon, lat] vertex out of a collection, counting any that were skipped as non-finite. */
-export const collectPoints = (collection: FeatureCollection) => {
-  const points: number[][] = [];
-  let skipped = 0;
-  const walk = (c: any) => {
-    if (typeof c[0] !== 'number') return c.forEach(walk);
-    if (Number.isFinite(c[0]) && Number.isFinite(c[1])) points.push(c);
-    else skipped++;
-  };
-  collection.features.forEach((f) => 'coordinates' in f.geometry && walk(f.geometry.coordinates));
-  return { points, skipped };
-};
-
-export const extentOf = (points: number[][]): Extent =>
-  points.reduce<Extent>(
-    (e, [lon, lat]) => ({
-      west: Math.min(e.west, lon),
-      east: Math.max(e.east, lon),
-      south: Math.min(e.south, lat),
-      north: Math.max(e.north, lat)
-    }),
-    { west: Infinity, south: Infinity, east: -Infinity, north: -Infinity }
-  );
-
-/** True if the extent is plausibly lon/lat degrees (a projected CRS or 0-360 grid can't be compared). */
-export const looksLikeDegrees = ([west, south, east, north]: Bbox) =>
-  west >= -180 && east <= 180 && south >= -90 && north <= 90;
 
 /**
  * Builds the "everything except this shape" polygon: a frame with each of the shape's polygons cut out as
@@ -238,31 +190,18 @@ export const looksLikeDegrees = ([west, south, east, north]: Bbox) =>
  * Built as one polygon so it works with any clipper that handles holes. Follows RFC 7946 winding: frame
  * anticlockwise, holes clockwise.
  */
-export const invertShape = (shape: unknown, bbox: Bbox | undefined) => {
+export const invertShape = (shape: unknown, rasterBbox: Bbox = [-180, -90, 180, 90]) => {
   const polygons = collectPolygons(shape);
   if (!polygons.length) return { problem: 'That shape has no polygons, so it cannot be inverted.' } as const;
 
-  const { points } = collectPoints({
-    type: 'FeatureCollection',
-    features: polygons.map((coordinates) => ({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates } }))
-  });
-  const shapeExtent = extentOf(points);
-  const [w, s, e, n] = bbox && looksLikeDegrees(bbox) ? bbox : [-180, -90, 180, 90];
+  const [shapeWest, shapeSouth, shapeEast, shapeNorth] = bbox({ type: 'MultiPolygon', coordinates: polygons });
+  const [w, s, e, n] = rasterBbox;
   const PAD = 1;
-  const west = Math.min(shapeExtent.west, w) - PAD;
-  const south = Math.min(shapeExtent.south, s) - PAD;
-  const east = Math.max(shapeExtent.east, e) + PAD;
-  const north = Math.max(shapeExtent.north, n) + PAD;
+  const frame: Bbox = [Math.min(shapeWest, w) - PAD, Math.min(shapeSouth, s) - PAD, Math.max(shapeEast, e) + PAD, Math.max(shapeNorth, n) + PAD];
 
-  const frame = [
-    [west, south],
-    [east, south],
-    [east, north],
-    [west, north],
-    [west, south]
-  ];
-  const holes = polygons.map((polygon) => orient(polygon[0], true));
-  const islands = polygons.flatMap((polygon) => polygon.slice(1).map((ring) => [orient(ring, false)]));
+  // turf's mask unions the shapes and punches their outer rings out of the frame, but drops their own holes.
+  const frameWithHoles = mask({ type: 'MultiPolygon', coordinates: polygons }, bboxPolygon(frame)).geometry.coordinates;
+  const islands = polygons.flatMap((polygon) => polygon.slice(1).map((ring) => [ring]));
 
   const inverted = {
     type: 'FeatureCollection',
@@ -270,11 +209,11 @@ export const invertShape = (shape: unknown, bbox: Bbox | undefined) => {
       {
         type: 'Feature',
         properties: {},
-        geometry: { type: 'MultiPolygon', coordinates: [[orient(frame, false), ...holes], ...islands] }
+        geometry: rewind({ type: 'MultiPolygon', coordinates: [frameWithHoles, ...islands] })
       }
     ]
   } as unknown as GeoJsonInput;
-  return { shape: inverted, frame: { west, south, east, north }, holes: holes.length } as const;
+  return { shape: inverted, frame, holes: frameWithHoles.length - 1 } as const;
 };
 
 /* ---- Projection ---- */
@@ -306,91 +245,61 @@ export const PROJECTION_BUILDERS: Record<ProjectionId, ProjectionBuilder> = {
   }
 };
 
-/** Picks the starting projection for a dataset: Australian conic if it's around Australia, otherwise Equal Earth. */
-export const defaultProjectionFor = (bbox: Bbox | undefined): ProjectionId => {
-  if (!bbox || !looksLikeDegrees(bbox)) return 'equal-earth';
-  const [west, south, east, north] = bbox;
-  const region = AUSTRALIA_REGION;
-  const inRegion = west >= region.west && east <= region.east && south >= region.south && north <= region.north;
-  return inRegion ? 'australia' : 'equal-earth';
-};
-
-/** Points tracing the edge of the whole world (lon -180..180) between two latitudes. Enough for d3 to fit to. */
-export const worldOutline = ([south, north]: [number, number]): number[][] => {
-  const lons = Array.from({ length: 360 / WORLD_STEP + 1 }, (_, i) => -180 + i * WORLD_STEP);
-  const firstLat = Math.ceil(south / WORLD_STEP) * WORLD_STEP;
-  const lats = Array.from({ length: Math.max(0, Math.floor((north - firstLat) / WORLD_STEP) + 1) }, (_, i) => firstLat + i * WORLD_STEP);
-  return [
-    ...lons.flatMap((lon) => [[lon, south], [lon, north]]),
-    ...lats.flatMap((lat) => [[-180, lat], [180, lat]]),
-    [-180, south],
-    [180, south],
-    [-180, north],
-    [180, north]
-  ];
-};
+/** Every finite [lon, lat] vertex in a collection. */
+const finitePoints = (collection: FeatureCollection) =>
+  coordAll(collection).filter(([lon, lat]) => Number.isFinite(lon) && Number.isFinite(lat));
 
 /**
- * The longitude to centre the map on. Defaults to the middle of the plain west-east extent, which puts
- * world-spanning data on the Greenwich side as expected. Only when the data is a compact region that
- * crosses the antimeridian (Fiji, NZ's Chatham Islands, Alaska's Aleutians...) does it centre on the
- * wrapped arc instead; otherwise such data would be split across both edges of the map.
+ * The longitude to centre a map of the data on, for projections that rotate (Equal Earth, Mercator).
+ * d3 cuts the map at the antimeridian opposite the rotation, so this has to be chosen before projecting.
+ *
+ * Defaults to the middle of the plain west-east extent, which puts world-spanning data on the Greenwich
+ * side as expected. Only when the data is a compact region that crosses the antimeridian (Fiji, NZ's
+ * Chatham Islands, Alaska's Aleutians...) does it centre on the wrapped arc d3's `geoBounds` finds instead;
+ * otherwise such data would be split across both edges of the map.
  *
  * "Compact" matters: for world-spanning data the smallest arc just routes around whichever interior gap
  * is widest (e.g. the Pacific), which would wrongly centre the map on the antimeridian.
+ *
+ * Measured on the vertices as a MultiPoint, because `geoBounds` on polygons depends on their winding.
  */
-export const centreLongitude = (points: number[][]) => {
-  if (!points.length) return { centre: 0, mode: 'empty' as const, planarSpan: 0, wrappedSpan: 0 };
-  const lons = Float64Array.from(points, (p) => p[0]).sort();
-  const west = lons[0];
-  const east = lons[lons.length - 1];
-  const planarSpan = east - west;
-  const planarCentre = (west + east) / 2;
+export const centreLongitude = (collection: FeatureCollection) => {
+  const points = finitePoints(collection);
+  if (!points.length) return 0;
+  const vertices: MultiPoint = { type: 'MultiPoint', coordinates: points };
 
-  // Widest empty gap between neighbouring longitudes, counting the one across the antimeridian.
-  const { widestGap, wrappedCentre } = Array.from(lons.slice(1), (lon, i) => ({ gap: lon - lons[i], mid: (lon + lons[i] + 360) / 2 })).reduce(
-    (best, { gap, mid }) => (gap > best.widestGap ? { widestGap: gap, wrappedCentre: mid } : best),
-    { widestGap: west + 360 - east, wrappedCentre: planarCentre }
-  );
-  const wrappedSpan = 360 - widestGap;
+  const [planarWest, , planarEast] = bbox(vertices);
+  const [[wrappedWest], [wrappedEast]] = geoBounds(vertices);
+  const wrappedSpan = wrappedEast >= wrappedWest ? wrappedEast - wrappedWest : wrappedEast - wrappedWest + 360;
 
-  const wrap = planarSpan > MAX_WRAPPED_SPAN && wrappedSpan <= MAX_WRAPPED_SPAN;
-  const centre = wrap ? wrappedCentre : planarCentre;
-  return {
-    centre: ((centre + 540) % 360) - 180,
-    mode: wrap ? ('wrapped' as const) : ('planar' as const),
-    planarSpan,
-    wrappedSpan
-  };
+  const wrap = planarEast - planarWest > MAX_WRAPPED_SPAN && wrappedSpan <= MAX_WRAPPED_SPAN;
+  const centre = wrap ? wrappedWest + wrappedSpan / 2 : (planarWest + planarEast) / 2;
+  return ((centre + 540) % 360) - 180;
 };
 
 /**
  * Creates the chosen projection fitted to `width`, plus the SVG height that fits the result.
- * Returns undefined (after logging why) if there's nothing finite to fit to.
+ * `centreLon` is the longitude the map is centred on (see `centreLongitude`); projections with a fixed
+ * centre, like the Australian conic, ignore it. Returns undefined if there's nothing finite to fit to.
  */
-export const fitProjection = (id: ProjectionId, collection: FeatureCollection, wholeWorld: boolean, width = WIDTH) => {
-  const { points, skipped } = collectPoints(collection);
-  if (skipped) warn('skipped non-finite vertices', { skipped });
-  if (!points.length) {
-    warn('nothing to fit: no finite vertices', { projection: id });
-    return undefined;
-  }
+export const fitProjection = (id: ProjectionId, collection: FeatureCollection, wholeWorld: boolean, width = WIDTH, centreLon = 0) => {
+  const points = finitePoints(collection);
+  if (!points.length) return undefined;
 
-  const extent = extentOf(points);
-
-  // "Whole world": a fixed frame, centred on Greenwich, however much of the globe the (possibly cropped)
-  // bands cover. Without it the frame follows the data, so a crop that drops Antarctica would zoom the map.
-  const { centre: centreLon } = wholeWorld ? { centre: 0 } : centreLongitude(points);
+  const [west, south, east, north] = bbox({ type: 'MultiPoint', coordinates: points });
 
   // Pad degenerate extents (one point, a straight N-S or E-W line) so the fit has something to scale to.
-  const isDegenerate = extent.east - extent.west < MIN_SPAN || extent.north - extent.south < MIN_SPAN;
-  const lat = (extent.north + extent.south) / 2;
+  const isDegenerate = east - west < MIN_SPAN || north - south < MIN_SPAN;
+  const lat = (north + south) / 2;
   const padding = isDegenerate ? [[centreLon - MIN_SPAN / 2, lat - MIN_SPAN / 2], [centreLon + MIN_SPAN / 2, lat + MIN_SPAN / 2]] : [];
-  if (isDegenerate && !wholeWorld) warn('degenerate extent padded', extent);
 
+  // The world's edge, as vertices (d3's graticule outline) between the projection's usable latitudes.
+  const [worldSouth, worldNorth] = PROJECTION_BUILDERS[id].worldLatitudes ?? [-90, 90];
   const target: MultiPoint = {
     type: 'MultiPoint',
-    coordinates: wholeWorld ? worldOutline(PROJECTION_BUILDERS[id].worldLatitudes ?? [-90, 90]) : [...points, ...padding]
+    coordinates: wholeWorld
+      ? geoGraticule().extent([[-180, worldSouth], [180, worldNorth]]).outline().coordinates[0]
+      : [...points, ...padding]
   };
 
   // Fresh projection each time: fit* mutates it. fitWidth scales to `width` and pins the top of
@@ -398,13 +307,9 @@ export const fitProjection = (id: ProjectionId, collection: FeatureCollection, w
   const projection = PROJECTION_BUILDERS[id].create(centreLon).fitWidth(width, target);
   const [, [, bottom]] = geoPath(projection).bounds(target);
   const height = Math.ceil(bottom);
-  log('fit', { projection: id, wholeWorld, vertices: points.length, extent, centreLon, scale: projection.scale(), height });
 
-  if (!Number.isFinite(projection.scale()) || !Number.isFinite(height)) {
-    warn('fit produced a non-finite projection', { projection: id, extent });
-    return undefined;
-  }
-  return { projection, height: Math.max(1, height), extent };
+  if (!Number.isFinite(projection.scale()) || !Number.isFinite(height)) return undefined;
+  return { projection, height: Math.max(1, height) };
 };
 
 /* ---- Styling and layout ---- */
@@ -433,19 +338,19 @@ export type Layout = { width: number; height: number; paths: LayoutPath[] };
 
 type BuildLayoutOptions = {
   bands?: FeatureCollection;
-  projection?: ProjectionId;
+  projection: ProjectionId;
   /** Fit to the whole globe instead of the data's extent. */
   wholeWorld?: boolean;
   width?: number;
-  /** The source raster's extent, only used to warn when the bands fall outside it. */
-  rasterBbox?: Bbox;
+  /** Longitude to centre the map on, for projections that rotate. Defaults to Greenwich. See `centreLongitude`. */
+  centreLon?: number;
 };
 
 /**
  * Projects bands to SVG paths. The height comes from the data's projected shape, so the aspect
  * ratio is never fixed. Returns undefined when there's nothing drawable.
  */
-export const buildLayout = ({ bands, projection = 'australia', wholeWorld = false, width = WIDTH, rasterBbox }: BuildLayoutOptions): Layout | undefined => {
+export const buildLayout = ({ bands, projection, wholeWorld = false, width = WIDTH, centreLon }: BuildLayoutOptions): Layout | undefined => {
   if (!bands?.features.length) return undefined;
   const clamp = !!PROJECTION_BUILDERS[projection].clampLatitudes;
 
@@ -467,33 +372,14 @@ export const buildLayout = ({ bands, projection = 'australia', wholeWorld = fals
     const geometry = clamp && 'coordinates' in prepared ? ({ ...prepared, coordinates: clampLatitudes(prepared.coordinates) } as Geometry) : prepared;
     return [{ ...f, geometry }];
   });
-  log('layout input', { projection, received: bands.features.length, drawn: features.length });
   if (!features.length) return undefined;
 
-  // Spherical sanity check (diagnostic only). A polygon covering more than a hemisphere is almost
-  // certainly a ring d3 reads as inverted, which draws as "the whole world minus this".
-  const inverted = features.flatMap((f, i) => (geoArea(f) > 2 * Math.PI ? [i] : []));
-  if (inverted.length) warn('features covering more than a hemisphere (likely inverted winding)', { count: inverted.length, firstIndexes: inverted.slice(0, 10) });
-
   const collection: FeatureCollection = { type: 'FeatureCollection', features };
-  const fit = fitProjection(projection, collection, wholeWorld, width);
+  const fit = fitProjection(projection, collection, wholeWorld, width, centreLon);
   if (!fit) return undefined;
-
-  // Bands should sit inside the raster. If they don't, the geometry is wrong before it reaches here
-  // (createIsobands / clipTo), and no amount of fitting will make the map look right.
-  if (rasterBbox && looksLikeDegrees(rasterBbox)) {
-    const [west, south, east, north] = rasterBbox;
-    const tol = 1;
-    const { extent } = fit;
-    if (extent.west < west - tol || extent.east > east + tol || extent.south < south - tol || extent.north > north + tol) {
-      warn('band geometry extends beyond the raster: the clip/isoband output is oversized', { bandExtent: extent, rasterBbox });
-    }
-  }
 
   const toPath = geoPath(fit.projection);
   const paths = features.map((feature) => ({ d: toPath(feature) ?? '', ...simplestyle(feature.properties) }));
-  const empty = paths.filter((p) => !p.d).length;
-  if (empty) warn('features that produced an empty path', { empty, of: paths.length });
   return { width, height: fit.height, paths };
 };
 

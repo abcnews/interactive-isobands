@@ -1,18 +1,17 @@
+import { booleanClockwise } from '@turf/boolean-clockwise';
 import { geoContains } from 'd3-geo';
 import type { FeatureCollection } from 'geojson';
 import { describe, expect, it } from 'vitest';
 import {
-  area,
   bandCount,
   buildLayout,
   centreLongitude,
   collectPolygons,
-  defaultProjectionFor,
+  fitProjection,
   invertShape,
   niceInterval,
   preparePolygon,
   rangeFor,
-  rewind,
   simplestyle
 } from './geo.ts';
 
@@ -34,11 +33,30 @@ const bandsOf = (...rings: number[][][]): FeatureCollection => ({
   }))
 });
 
-describe('rewind', () => {
-  it('winds exterior rings clockwise and holes anticlockwise', () => {
-    const [exterior, hole] = rewind([square(0, 0, 10), square(2, 2, 2)]);
-    expect(area(exterior)).toBeGreaterThan(0);
-    expect(area(hole)).toBeLessThan(0);
+/** A collection holding just these vertices, for tests that only care about where the data is. */
+const pointsOf = (...coordinates: number[][]): FeatureCollection => ({
+  type: 'FeatureCollection',
+  features: [{ type: 'Feature', properties: {}, geometry: { type: 'MultiPoint', coordinates } }]
+});
+
+describe('preparePolygon', () => {
+  it('winds exterior rings clockwise and holes anticlockwise for d3', () => {
+    const [exterior, hole] = preparePolygon([square(0, 0, 10), square(2, 2, 2)])!;
+    expect(booleanClockwise(exterior)).toBe(true);
+    expect(booleanClockwise(hole)).toBe(false);
+  });
+
+  it('keeps the filled side of a polygon circling the pole', () => {
+    const strip = [[-180, -80], [-90, -80], [0, -80], [90, -80], [180, -80], [180, -90], [-180, -90], [-180, -80]];
+    const feature = { type: 'Polygon', coordinates: preparePolygon([strip])! } as const;
+    expect(geoContains(feature, [0, -89])).toBe(true);
+    expect(geoContains(feature, [0, 0])).toBe(false);
+  });
+
+  it('drops degenerate rings and near-collinear slivers', () => {
+    expect(preparePolygon([[[0, 0], [1, 1], [0, 0]]])).toBeUndefined();
+    const sliver = [[23.88698, 8.61973], [23.80581, 8.66632], [24.56737, 8.22919], [23.88698, 8.61973]];
+    expect(preparePolygon([sliver])).toBeUndefined();
   });
 });
 
@@ -77,34 +95,43 @@ describe('bands and ranges', () => {
 });
 
 describe('projection helpers', () => {
-  it('keeps the Australian conic only for data around Australia', () => {
-    expect(defaultProjectionFor([110, -45, 155, -10])).toBe('australia');
-    expect(defaultProjectionFor([-180, -90, 180, 90])).toBe('equal-earth');
-    expect(defaultProjectionFor([0, 0, 360, 90])).toBe('equal-earth');
-    expect(defaultProjectionFor(undefined)).toBe('equal-earth');
-  });
-
   it('centres compact regions across the antimeridian', () => {
-    const fiji = [[177, -18], [179, -17], [-179, -16], [-178, -19]];
-    expect(centreLongitude(fiji).mode).toBe('wrapped');
-    expect(centreLongitude(fiji).centre).toBeCloseTo(179.5);
+    const fiji = pointsOf([177, -18], [179, -17], [-179, -16], [-178, -19]);
+    expect(centreLongitude(fiji)).toBeCloseTo(179.5);
   });
 
   it('centres world-spanning data on the plain extent', () => {
-    expect(centreLongitude([[-170, 0], [-60, 0], [10, 0], [120, 0], [170, 0]]).mode).toBe('planar');
+    expect(centreLongitude(pointsOf([-170, 0], [-60, 0], [10, 0], [120, 0], [170, 0]))).toBeCloseTo(0);
+  });
+
+  it('fits a fixed whole-world frame, wider than tall', () => {
+    const fit = fitProjection('equal-earth', bandsOf(square(130, -30)), true);
+    // Equal Earth's world is about 2.05:1, so at width 1000 the height is about 490.
+    expect(fit?.height).toBeGreaterThan(450);
+    expect(fit?.height).toBeLessThan(530);
+  });
+
+  it('refuses to fit data with no finite vertices', () => {
+    expect(fitProjection('equal-earth', bandsOf(), false)).toBeUndefined();
   });
 });
 
 describe('invertShape', () => {
   it('cuts the shape out of a frame that covers the raster', () => {
-    const shape = bandsOf(square(10, 10));
-    const result = invertShape(shape, [0, 0, 30, 30]);
+    const result = invertShape(bandsOf(square(10, 10)), [0, 0, 30, 30]);
     if (!('shape' in result)) throw new Error('expected a shape');
     expect(result.holes).toBe(1);
-    expect(result.frame).toEqual({ west: -1, south: -1, east: 31, north: 31 });
+    expect(result.frame).toEqual([-1, -1, 31, 31]);
     const [[frame, hole]] = collectPolygons(result.shape);
-    expect(area(frame)).toBeLessThan(0); // anticlockwise
-    expect(area(hole)).toBeGreaterThan(0); // clockwise
+    expect(booleanClockwise(frame)).toBe(false); // anticlockwise
+    expect(booleanClockwise(hole)).toBe(true); // clockwise
+  });
+
+  it('keeps holes in the shape as islands', () => {
+    const lake = [[12, 12], [12, 14], [14, 14], [14, 12], [12, 12]];
+    const result = invertShape({ type: 'Polygon', coordinates: [square(10, 10), lake] }, [0, 0, 30, 30]);
+    if (!('shape' in result)) throw new Error('expected a shape');
+    expect(collectPolygons(result.shape)).toHaveLength(2);
   });
 
   it('reports shapes with no polygons', () => {
@@ -115,8 +142,8 @@ describe('invertShape', () => {
 
 describe('buildLayout', () => {
   it('returns nothing without bands', () => {
-    expect(buildLayout({})).toBeUndefined();
-    expect(buildLayout({ bands: bandsOf() })).toBeUndefined();
+    expect(buildLayout({ projection: 'australia' })).toBeUndefined();
+    expect(buildLayout({ bands: bandsOf(), projection: 'australia' })).toBeUndefined();
   });
 
   it('projects bands to paths with a data-driven height', () => {
@@ -130,20 +157,12 @@ describe('buildLayout', () => {
 
   it('drops near-collinear slivers that d3 would read as the whole globe', () => {
     const sliver = [[23.88698, 8.61973], [23.80581, 8.66632], [24.56737, 8.22919], [23.88698, 8.61973]];
-    expect(buildLayout({ bands: bandsOf(square(130, -30), sliver) })?.paths).toHaveLength(1);
-  });
-
-  it('keeps the filled side of a polygon circling the pole', () => {
-    const strip = [[-180, -80], [-90, -80], [0, -80], [90, -80], [180, -80], [180, -90], [-180, -90], [-180, -80]];
-    const prepared = preparePolygon([strip])!;
-    const feature = { type: 'Polygon', coordinates: prepared } as const;
-    expect(geoContains(feature, [0, -89])).toBe(true);
-    expect(geoContains(feature, [0, 0])).toBe(false);
+    expect(buildLayout({ bands: bandsOf(square(130, -30), sliver), projection: 'australia' })?.paths).toHaveLength(1);
   });
 
   it('drops degenerate polygons', () => {
     const bands = bandsOf(square(130, -30), [[0, 0], [1, 1], [0, 0]]);
-    expect(buildLayout({ bands })?.paths).toHaveLength(1);
+    expect(buildLayout({ bands, projection: 'australia' })?.paths).toHaveLength(1);
   });
 
   it('fits Web Mercator without producing non-finite paths at the poles', () => {
