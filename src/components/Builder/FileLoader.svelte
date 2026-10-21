@@ -27,13 +27,7 @@
   // Preset data sources
   // ---------------------------------------------------------------------------
 
-  const DATA_BASE_URL = 'https://abcnewsdata.sgp1.digitaloceanspaces.com/service-ecmwf-gridded-forecasts';
-
-  /** Folders are dated from here... */
-  const FIRST_DATE = '2026-10-16';
-  /** ...up to this many days after today (a 6 day forecast). */
-  const DAYS_AHEAD = 6;
-  const TIME_ZONE = 'Australia/Sydney';
+  import { DATA_BASE_URL, availableDates, todayInSydney } from '../../lib/forecastdates.ts';
 
   /** Every dataset is a temperature, so they all use the Summer heat preset. */
   const DATASETS = [{ id: 'ifs-t2m', label: 'ECMWF IFS, 2m temperature', preset: 'summer-heat' }];
@@ -62,23 +56,6 @@
   type Tab = 'load' | 'presets';
   /** How to load data on the "Load data" tab. */
   type Mode = 'url' | 'file';
-
-  /** Today's date in Sydney as YYYY-MM-DD, regardless of the browser's own time zone. */
-  const todayInSydney = () => new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE }).format(new Date());
-
-  const addDays = (iso: string, days: number) => {
-    const d = new Date(`${iso}T00:00:00Z`);
-    d.setUTCDate(d.getUTCDate() + days);
-    return d.toISOString().slice(0, 10);
-  };
-
-  /** Every available date from FIRST_DATE to today + DAYS_AHEAD, inclusive. */
-  const availableDates = (today: string) => {
-    const last = addDays(today, DAYS_AHEAD);
-    const dates: string[] = [];
-    for (let d = FIRST_DATE; d <= last; d = addDays(d, 1)) dates.push(d);
-    return dates;
-  };
 
   const fileNameFromUrl = (url: string) => {
     try {

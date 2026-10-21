@@ -12,22 +12,26 @@
     caption?: Snippet;
     /** Narrowest width (px) of the figure's own box that gets three columns instead of two */
     desktopMinWidth?: number;
+    /** Whether to render each panel's label */
+    showLabels?: boolean;
   }
 
-  let { items, heading, panel, caption, desktopMinWidth = 544 }: Props = $props();
+  let { items, heading, panel, caption, desktopMinWidth = 544, showLabels = true }: Props = $props();
 
   // Measured on the figure itself rather than with a viewport media query: embeds sit in columns and
   // iframes that are narrower than the window, so the viewport width says nothing about the space we have.
   let figureWidth = $state(0);
   const isDesktop = $derived(figureWidth >= desktopMinWidth);
+  // Never more columns than panels, so a single panel (days=1) fills the full width.
+  const columns = $derived(Math.min(items.length || 1, isDesktop ? 3 : 2));
 </script>
 
 <figure bind:clientWidth={figureWidth}>
   {@render heading?.()}
-  <ul style:grid-template-columns="repeat({isDesktop ? 3 : 2}, minmax(0, 1fr))">
+  <ul style:grid-template-columns="repeat({columns}, minmax(0, 1fr))">
     {#each items as item (item.key)}
       <li>
-        <p>{item.label}</p>
+        {#if showLabels}<p>{item.label}</p>{/if}
         {@render panel(item)}
       </li>
     {/each}
