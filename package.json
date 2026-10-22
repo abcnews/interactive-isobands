@@ -1,7 +1,7 @@
 {
   "name": "interactive-isobands",
   "private": true,
-  "version": "1.0.0-prerelease.0",
+  "version": "1.0.0-prerelease.1",
   "description": "A project generated from aunty's svelte project template.",
   "license": "MIT",
   "type": "module",
