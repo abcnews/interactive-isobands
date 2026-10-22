@@ -1,6 +1,6 @@
 import { rgb } from 'd3-color';
-import { geoPath, type GeoProjection } from 'd3-geo';
-import type { Feature, FeatureCollection, MultiPolygon } from 'geojson';
+import type { GeoProjection } from 'd3-geo';
+import type { FeatureCollection, MultiPolygon } from 'geojson';
 import { fromArrayBuffer } from 'geotiff';
 import { WorkerHost } from 'workiq';
 import type { GeoJsonInput } from './fastclip.ts';
@@ -102,16 +102,69 @@ export const createGradientScale = (
 /** A grid that spans (nearly) the globe in longitude can be wrapped, so 0-360 and -180-180 grids both work. */
 const GLOBAL_SPAN_DEGREES = 359;
 
+/** A ring of [x, y] points in output pixel space. */
+type PixelRing = readonly (readonly [x: number, y: number])[];
+
+/** Sub-scanlines per pixel row when measuring how much of a pixel the boundary covers. */
+const COVERAGE_SUBSAMPLES = 4;
+
+/**
+ * How much of each output pixel (row-major, 0-255) lies inside the boundary, with an anti-aliased edge.
+ * Rings are filled even-odd, so holes work. Each pixel row is sampled on a few horizontal lines, and each
+ * line adds the exact horizontal overlap of its inside spans.
+ */
+export const rasteriseBoundary = (rings: readonly PixelRing[], width: number, height: number): Uint8Array => {
+  // Edges bucketed by the pixel rows they touch, so each row only looks at its own edges.
+  const edgesByRow: (readonly number[])[][] = Array.from({ length: height }, () => []);
+  rings.forEach(ring =>
+    ring.slice(0, -1).forEach(([x0, y0], i) => {
+      const [x1, y1] = ring[i + 1];
+      if (y0 === y1) return;
+      const firstRow = Math.max(0, Math.floor(Math.min(y0, y1)));
+      const lastRow = Math.min(height - 1, Math.floor(Math.max(y0, y1)));
+      for (let row = firstRow; row <= lastRow; row++) edgesByRow[row].push([x0, y0, x1, y1]);
+    })
+  );
+
+  const coverage = new Uint8Array(width * height);
+  const rowOverlap = new Float32Array(width);
+  // Hot loop: plain loops, as this runs per output pixel.
+  for (let row = 0; row < height; row++) {
+    if (!edgesByRow[row].length) continue;
+    rowOverlap.fill(0);
+
+    for (let line = 0; line < COVERAGE_SUBSAMPLES; line++) {
+      const y = row + (line + 0.5) / COVERAGE_SUBSAMPLES;
+      const crossings = edgesByRow[row]
+        .filter(([, y0, , y1]) => y0 <= y !== y1 <= y)
+        .map(([x0, y0, x1, y1]) => x0 + ((y - y0) / (y1 - y0)) * (x1 - x0))
+        .sort((a, b) => a - b);
+
+      for (let span = 0; span + 1 < crossings.length; span += 2) {
+        const start = Math.max(0, crossings[span]);
+        const end = Math.min(width, crossings[span + 1]);
+        for (let x = Math.floor(start); x < Math.ceil(end); x++) {
+          rowOverlap[x] += Math.min(end, x + 1) - Math.max(start, x);
+        }
+      }
+    }
+    for (let x = 0; x < width; x++) coverage[row * width + x] = Math.round((rowOverlap[x] / COVERAGE_SUBSAMPLES) * 255);
+  }
+  return coverage;
+};
+
 /**
  * For every output pixel, where it lands in the grid as fractional [column, row] (pixel centres at
  * integers, matching bilinear sampling). Stored as interleaved Float32 pairs, NaN where the pixel
- * is off the map. Depends only on the projection and grid geometry, not the values, so it is reused
- * between rasters with the same grid.
+ * is off the map or outside the boundary (zero `coverage`), which skips the projection for them.
+ * Depends only on the projection, boundary and grid geometry, not the values, so it is reused between
+ * rasters with the same grid.
  */
 export const buildSampleMap = (
   projection: Pick<GeoProjection, 'invert'>,
   { width, height }: { width: number; height: number },
-  { origin, resolution, width: gridWidth }: Pick<RasterGrid, 'origin' | 'resolution' | 'width'>
+  { origin, resolution, width: gridWidth }: Pick<RasterGrid, 'origin' | 'resolution' | 'width'>,
+  coverage: Uint8Array
 ): Float32Array => {
   const map = new Float32Array(width * height * 2).fill(Number.NaN);
   const isGlobal = Math.abs(resolution[0]) * gridWidth >= GLOBAL_SPAN_DEGREES;
@@ -119,6 +172,7 @@ export const buildSampleMap = (
   // Hot loop: plain for loops, as this runs once per output pixel.
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
+      if (coverage[y * width + x] === 0) continue;
       const lonLat = projection.invert?.([x + 0.5, y + 0.5]);
       if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) continue;
 
@@ -165,12 +219,16 @@ export const sampleBilinear = (grid: RasterGrid, column: number, row: number): n
   return totalWeight === 0 ? Number.NaN : sum / totalWeight;
 };
 
-/** Paints the grid into RGBA pixels (row-major, `width` x `height`); transparent where there is no data. */
+/**
+ * Paints the grid into RGBA pixels (row-major, `width` x `height`); transparent where there is no data or
+ * outside the boundary. Pixels on the boundary's edge get their alpha scaled by `coverage`.
+ */
 export const paintPixels = (
   grid: RasterGrid,
   sampleMap: Float32Array,
   scale: ColourScale,
-  { width, height }: { width: number; height: number }
+  { width, height }: { width: number; height: number },
+  coverage: Uint8Array
 ): Uint8ClampedArray => {
   const pixels = new Uint8ClampedArray(width * height * 4);
   const packed = new Uint32Array(pixels.buffer);
@@ -190,7 +248,10 @@ export const paintPixels = (
     } else {
       colour = Math.min(lastColour, Math.max(0, Math.round(((value - min) / (max - min)) * lastColour)));
     }
-    packed[i] = palette[colour];
+
+    const rgba = palette[colour];
+    const edge = coverage[i];
+    packed[i] = edge === 255 ? rgba : ((Math.round(((rgba >>> 24) * edge) / 255) << 24) | (rgba & 0xffffff)) >>> 0;
   }
   return pixels;
 };
@@ -198,8 +259,9 @@ export const paintPixels = (
 /* -------- Rendering -------- */
 
 /**
- * Everything needed to rebuild a fitted projection (which can't be posted to a worker) and the pixel
- * size it was fitted to. The projection is fully determined by these, since fitting only sets scale and translate.
+ * Everything needed to rebuild a fitted projection (which can't be posted to a worker), the pixel size it
+ * was fitted to, and the boundary the picture is cropped to. The projection is fully determined by these,
+ * since fitting only sets scale and translate.
  */
 export type RasterLayout = {
   readonly projectionId: ProjectionId;
@@ -208,19 +270,21 @@ export type RasterLayout = {
   readonly translate: readonly [x: number, y: number];
   readonly width: number;
   readonly height: number;
+  /** The boundary's rings, already projected into output pixel space. Pixels outside it are left transparent. */
+  readonly boundary: readonly PixelRing[];
 };
 
 export type RenderResult = {
-  /** RGBA, `layout.width` x `layout.height`, transparent where there's no data. Not clipped; the caller masks. */
+  /** RGBA, `layout.width` x `layout.height`, transparent where there's no data or outside the boundary. */
   pixels: Uint8ClampedArray;
   /** True if the pixel-to-grid map from the previous render was reused. */
   reusedSampleMap: boolean;
 };
 
-/** The last sample map built: panels in a set share a projection and grid, so it is built once. */
-let lastSampleMap: { key: string; map: Float32Array } | undefined;
+/** The last sample map and boundary coverage built: panels in a set share a layout and grid, so they are built once. */
+let lastSampleMap: { key: string; map: Float32Array; coverage: Uint8Array } | undefined;
 
-/** Reads the GeoTIFF and paints it as RGBA pixels in the layout's pixel space. */
+/** Reads the GeoTIFF and paints it as RGBA pixels in the layout's pixel space, cropped to its boundary. */
 export const renderRasterPixels = async (
   buffer: ArrayBuffer,
   layout: RasterLayout,
@@ -235,10 +299,12 @@ export const renderRasterPixels = async (
       .create(layout.centreLon)
       .scale(layout.scale)
       .translate([...layout.translate]);
-    lastSampleMap = { key, map: buildSampleMap(projection, layout, grid) };
+    const coverage = rasteriseBoundary(layout.boundary, layout.width, layout.height);
+    lastSampleMap = { key, coverage, map: buildSampleMap(projection, layout, grid, coverage) };
   }
 
-  return { pixels: paintPixels(grid, lastSampleMap!.map, colourScale, layout), reusedSampleMap };
+  const { map, coverage } = lastSampleMap!;
+  return { pixels: paintPixels(grid, map, colourScale, layout, coverage), reusedSampleMap };
 };
 
 /* -------- Canvas size -------- */
@@ -260,60 +326,51 @@ export const choosePixelWidth = (cssWidth: number, devicePixelRatio = 1): number
   return Math.min(MAX_PIXEL_WIDTH, Math.max(MIN_PIXEL_WIDTH, wanted));
 };
 
-/* -------- Boundary mask and layout (page only) -------- */
+/* -------- Layout -------- */
 
-export type RasterFrame = {
-  readonly layout: RasterLayout;
-  /** Opaque where the map is visible. Multiply the painted pixels by this to clip them to the boundary. */
-  readonly mask: HTMLCanvasElement;
-};
-
-/** Frames are shared by every panel with the same boundary, projection and width. */
-const frames = new WeakMap<object, Map<string, RasterFrame | undefined>>();
+/** Layouts are shared by every panel with the same boundary, projection and width. */
+const layouts = new WeakMap<object, Map<string, RasterLayout | undefined>>();
 
 /**
- * Fits the projection to the boundary's extent (as the vector maps fit to their clipped bands) and draws
- * the boundary once as an anti-aliased alpha mask. Returns undefined if the boundary has nothing drawable.
+ * Fits the projection to the boundary's extent (as the vector maps fit to their clipped bands) and projects
+ * the boundary into pixel space for the worker to crop to. Returns undefined if the boundary has nothing drawable.
  * Memoised, as small multiples share one boundary.
  */
-export const createRasterFrame = (projectionId: ProjectionId, clip: GeoJsonInput, width: number): RasterFrame | undefined => {
-  const byKey = frames.get(clip as object) ?? new Map<string, RasterFrame | undefined>();
-  frames.set(clip as object, byKey);
+export const createRasterLayout = (projectionId: ProjectionId, clip: GeoJsonInput, width: number): RasterLayout | undefined => {
+  const byKey = layouts.get(clip as object) ?? new Map<string, RasterLayout | undefined>();
+  layouts.set(clip as object, byKey);
   const key = `${projectionId}|${width}`;
   if (byKey.has(key)) return byKey.get(key);
 
   const polygons = collectPolygons(clip)
     .map(preparePolygon)
     .filter((polygon): polygon is number[][][] => !!polygon);
-  const boundary: Feature<MultiPolygon> = {
-    type: 'Feature',
-    properties: {},
-    geometry: { type: 'MultiPolygon', coordinates: polygons }
+  const collection: FeatureCollection<MultiPolygon> = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates: polygons } }]
   };
-  const collection: FeatureCollection = { type: 'FeatureCollection', features: [boundary] };
   const centreLon = centreLongitude(collection);
   const fit = polygons.length ? fitProjection(projectionId, collection, false, width, centreLon) : undefined;
 
-  const mask = document.createElement('canvas');
-  const context = fit && mask.getContext('2d');
-  if (!fit || !context) {
-    byKey.set(key, undefined);
-    return undefined;
-  }
-
-  mask.width = width;
-  mask.height = fit.height;
-  context.beginPath();
-  geoPath(fit.projection, context)(boundary);
-  context.fill();
-
-  const [translateX, translateY] = fit.projection.translate();
-  const frame = {
-    layout: { projectionId, centreLon, scale: fit.projection.scale(), translate: [translateX, translateY], width, height: fit.height },
-    mask
-  } satisfies RasterFrame;
-  byKey.set(key, frame);
-  return frame;
+  const [translateX, translateY] = fit?.projection.translate() ?? [0, 0];
+  const layout = fit && {
+    projectionId,
+    centreLon,
+    scale: fit.projection.scale(),
+    translate: [translateX, translateY] as const,
+    width,
+    height: fit.height,
+    boundary: polygons.flatMap(polygon =>
+      polygon.map(ring =>
+        ring.flatMap(([lon, lat]) => {
+          const point = fit.projection([lon, lat]);
+          return point ? [[point[0], point[1]] as const] : [];
+        })
+      )
+    )
+  };
+  byKey.set(key, layout);
+  return layout;
 };
 
 /* -------- Worker -------- */

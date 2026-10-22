@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'vitest';
-import { fitProjection, type ProjectionId } from './geo.ts';
 import {
   buildSampleMap,
   choosePixelWidth,
   createGradientScale,
+  createRasterLayout,
   createSteppedScale,
   paintPixels,
+  rasteriseBoundary,
   renderRasterPixels,
   sampleBilinear,
   type RasterGrid,
@@ -45,14 +46,59 @@ describe('sampleBilinear', () => {
 describe('buildSampleMap', () => {
   it('maps pixels to fractional grid positions', () => {
     // Identity-ish projection: 2x2 output where pixel (x, y) is lon x+.5, lat 2-(y+.5).
-    const map = buildSampleMap({ invert: ([x, y]) => [x, 2 - y] }, { width: 2, height: 2 }, grid([1, 2, 3, 4]));
+    const map = buildSampleMap({ invert: ([x, y]) => [x, 2 - y] }, { width: 2, height: 2 }, grid([1, 2, 3, 4]), new Uint8Array(4).fill(255));
     assert.deepEqual([...map.slice(0, 2)], [0, 0]);
     assert.deepEqual([...map.slice(6, 8)], [1, 1]);
   });
 
+  it('skips pixels outside the boundary without projecting them', () => {
+    let calls = 0;
+    const invert = ([x, y]: [number, number]): [number, number] => (calls++, [x, 2 - y]);
+    const map = buildSampleMap({ invert }, { width: 2, height: 1 }, grid([1, 2, 3, 4]), new Uint8Array([255, 0]));
+    assert.equal(calls, 1);
+    assert.ok(Number.isNaN(map[2]));
+  });
+
   it('leaves NaN where the projection has no inverse', () => {
-    const map = buildSampleMap({ invert: () => null }, { width: 1, height: 1 }, grid([1, 2, 3, 4]));
+    const map = buildSampleMap({ invert: () => null }, { width: 1, height: 1 }, grid([1, 2, 3, 4]), new Uint8Array([255]));
     assert.ok(Number.isNaN(map[0]));
+  });
+});
+
+describe('rasteriseBoundary', () => {
+  const square = (from: number, to: number) => [[from, from], [to, from], [to, to], [from, to], [from, from]] as const;
+
+  it('is fully covered inside and empty outside', () => {
+    const coverage = rasteriseBoundary([square(1, 3)], 4, 4);
+    assert.deepEqual([...coverage.slice(4, 8)], [0, 255, 255, 0]);
+    assert.deepEqual([...coverage.slice(0, 4)], [0, 0, 0, 0]);
+  });
+
+  it('anti-aliases edges that cut through a pixel', () => {
+    const coverage = rasteriseBoundary([square(0.5, 3)], 4, 4);
+    assert.ok(coverage[1 * 4 + 0] > 100 && coverage[1 * 4 + 0] < 160, 'half-covered edge pixel');
+    assert.equal(coverage[1 * 4 + 1], 255);
+  });
+
+  it('treats an inner ring as a hole', () => {
+    const coverage = rasteriseBoundary([square(0, 4), square(1, 3)], 4, 4);
+    assert.equal(coverage[0], 255);
+    assert.equal(coverage[1 * 4 + 1], 0);
+  });
+});
+
+describe('createRasterLayout', () => {
+  it('fits the boundary and projects its rings into pixel space', () => {
+    const layout = layoutAt(300);
+    assert.equal(layout.width, 300);
+    assert.ok(layout.height > 100);
+    const points = layout.boundary.flat();
+    assert.ok(points.length > 100);
+    assert.ok(points.every(([x, y]) => x >= -1 && x <= 301 && y >= -1 && y <= layout.height + 1));
+  });
+
+  it('is shared between calls with the same boundary and width', () => {
+    assert.equal(layoutAt(300), layoutAt(300));
   });
 });
 
@@ -68,8 +114,14 @@ describe('colour scales', () => {
 
   it('paints transparent where there is no data and colours elsewhere', () => {
     const scale = createGradientScale([0, 10], v => (v > 5 ? '#ffffff' : '#000000'));
-    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0, Number.NaN, Number.NaN]), scale, { width: 2, height: 1 });
+    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0, Number.NaN, Number.NaN]), scale, { width: 2, height: 1 }, new Uint8Array([255, 255]));
     assert.deepEqual([...pixels], [255, 255, 255, 255, 0, 0, 0, 0]);
+  });
+
+  it('scales alpha by boundary coverage on edge pixels', () => {
+    const scale = createGradientScale([0, 10], () => '#ffffff');
+    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0]), scale, { width: 1, height: 1 }, new Uint8Array([128]));
+    assert.deepEqual([...pixels], [255, 255, 255, 128]);
   });
 });
 
@@ -114,12 +166,8 @@ const smooth = createGradientScale([20, 45], value =>
   `#${Math.round(Math.min(255, Math.max(0, ((value - 20) / 25) * 255))).toString(16).padStart(2, '0')}0000`
 );
 
-/** Fits the Australian projection to the boundary at a pixel width, as `createRasterFrame` does in the browser. */
-const layoutAt = (width: number, projectionId: ProjectionId = 'australia'): RasterLayout => {
-  const fit = fitProjection(projectionId, boundary, false, width, 0)!;
-  const [x, y] = fit.projection.translate();
-  return { projectionId, centreLon: 0, scale: fit.projection.scale(), translate: [x, y], width, height: fit.height };
-};
+/** Fits the Australian projection to the boundary at a pixel width, as the page does. */
+const layoutAt = (width: number): RasterLayout => createRasterLayout('australia', boundary, width)!;
 
 /** Fraction of pixels that are not fully transparent. */
 const coverage = (pixels: Uint8ClampedArray) =>
@@ -133,6 +181,15 @@ describe('renderRasterPixels', () => {
     assert.equal(pixels.length, layout.width * layout.height * 4);
     assert.ok(coverage(pixels) > 0.3, 'expected a good share of pixels to have data');
     assert.equal(pixels[3], 0, 'top-left corner is outside the raster');
+  });
+
+  it('crops to the boundary: far fewer pixels than the whole grid', async () => {
+    const layout = layoutAt(300);
+    const { pixels } = await renderRasterPixels(tiff.slice(0), layout, stepped);
+    const boundaryCoverage = rasteriseBoundary(layout.boundary, layout.width, layout.height);
+    const insideBoundary = boundaryCoverage.filter(value => value > 0).length / boundaryCoverage.length;
+    assert.ok(insideBoundary < 0.8, 'boundary should not fill its whole bounding box');
+    assert.ok(coverage(pixels) <= insideBoundary + 0.001, 'nothing is painted outside the boundary');
   });
 
   it('gradient output uses more distinct colours than stepped output', async () => {

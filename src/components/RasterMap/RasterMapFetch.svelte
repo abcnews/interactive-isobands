@@ -5,7 +5,7 @@
   import { inview } from '../../lib/inview.ts';
   import {
     choosePixelWidth,
-    createRasterFrame,
+    createRasterLayout,
     renderRasterInWorker,
     type ColourScale
   } from '../../lib/rastergrid.ts';
@@ -37,7 +37,7 @@
   /** On-screen width of the panel in CSS pixels, 0 until measured. */
   let cssWidth = $state(0);
   const pixelWidth = $derived(fixedPixelWidth ?? choosePixelWidth(cssWidth, window.devicePixelRatio));
-  const frame = $derived(pixelWidth ? createRasterFrame(projection, clipTo, pixelWidth) : undefined);
+  const layout = $derived(pixelWidth ? createRasterLayout(projection, clipTo, pixelWidth) : undefined);
 
   // 1. Preload: start fetching the GeoTIFF immediately, abort if the url changes.
   $effect(() => {
@@ -59,11 +59,11 @@
 
   // 2. Render: only once the data is ready AND the map is near the viewport. Re-runs on a new colour scale.
   $effect(() => {
-    if (!near || !buffer || !frame) return;
-    const [data, layout, scale] = [buffer, frame.layout, colourScale];
+    if (!near || !buffer || !layout) return;
+    const [data, currentLayout, scale] = [buffer, layout, colourScale];
     let stale = false;
 
-    renderRasterInWorker(data, layout, scale)
+    renderRasterInWorker(data, currentLayout, scale)
       .then(({ pixels: result }) => {
         if (!stale) pixels = result;
       })
@@ -80,5 +80,5 @@
 </script>
 
 <div {@attach inview(rootMargin, () => (near = true))} bind:clientWidth={cssWidth}>
-  <RasterMap {frame} {pixels} {alt} {error} />
+  <RasterMap {layout} {pixels} {alt} {error} />
 </div>
