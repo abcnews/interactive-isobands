@@ -5,12 +5,14 @@
   // The iframe is routed by its hash, e.g. `#viz=SmallMultiplesForecastTemp&start=2026-10-20&days=4`.
   const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   const viz = params.get('viz') ?? 'SmallMultiplesForecastTemp';
-  const [start, days, show] = [params.get('start'), params.get('days'), params.get('show')];
+  const [start, days, show, renderer, file, look, min, max] = ['start', 'days', 'show', 'renderer', 'file', 'look', 'min', 'max'].map(name =>
+    params.get(name)
+  );
 </script>
 
 <TypographyProvider>
   {#if viz === 'SmallMultiplesForecastTemp'}
-    <SmallMultiplesForecastTemp {start} {days} {show} />
+    <SmallMultiplesForecastTemp {start} {days} {show} {renderer} {file} {look} {min} {max} />
   {:else}
     <p>Unknown viz: {viz}</p>
   {/if}

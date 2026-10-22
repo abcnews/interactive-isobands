@@ -20,7 +20,7 @@ export const colourScheme = {
  */
 export const SUMMER_HEAT_THRESHOLDS = [25, 30, 35, 40, 45];
 
-const summerHeatColours = (mode: ColourMode) =>
+export const summerHeatColours = (mode: ColourMode) =>
   getSequentialSteppedPalette(SUMMER_HEAT_THRESHOLDS.length, SequentialPalette.Red, mode);
 
 /**

@@ -1,9 +1,9 @@
-import { fromArrayBuffer, type GeoTIFFImage } from 'geotiff';
 import { contours as d3Contours } from 'd3-contour';
 import { ColourMode, SequentialPalette, createContinuousScale } from '@abcnews/palette';
 import type { Feature, FeatureCollection, MultiPolygon } from 'geojson';
 import { applyPalette, type BandPalette } from './bandstyle.ts';
 import { pathsToPolygons, type ClipperPath } from './fastclip.ts';
+import { isNoData, readRasterGrid, type RasterGrid } from './rastergrid.ts';
 
 /* ----------------------------- Configuration ------------------------- */
 
@@ -19,17 +19,6 @@ const DEFAULT_COLOUR_MODE = ColourMode.Light;
 const CHUNK_SIZE = 250_000;
 
 /* ------------------------------- Types ------------------------------- */
-
-type RasterGrid = {
-  readonly values: ArrayLike<number>;
-  readonly width: number;
-  readonly height: number;
-  /** Top-left corner of pixel (0,0) in CRS units. */
-  readonly origin: readonly [x: number, y: number];
-  /** Pixel size in CRS units; y is negative for north-up images. */
-  readonly resolution: readonly [x: number, y: number];
-  readonly noData: number | null;
-};
 
 export type { BandPalette };
 
@@ -69,29 +58,7 @@ const yieldToMain = (): Promise<void> => {
 
 /* --------------------------- Loading/reading ------------------------- */
 
-/** Parses the buffer as a TIFF and returns its first image. */
-const loadFirstImage = async (buffer: ArrayBuffer): Promise<GeoTIFFImage> => (await fromArrayBuffer(buffer)).getImage();
-
-/** Reads band 0 of the image plus the georeferencing details needed to place each pixel. */
-const readRasterGrid = async (image: GeoTIFFImage): Promise<RasterGrid> => {
-  const rasters = await image.readRasters();
-  const [originX, originY] = image.getOrigin();
-  const [resX, resY] = image.getResolution();
-
-  return {
-    values: rasters[0] as ArrayLike<number>,
-    width: image.getWidth(),
-    height: image.getHeight(),
-    origin: [originX, originY],
-    resolution: [resX, resY],
-    noData: image.getGDALNoData()
-  };
-};
-
 /* ------------------------- Class value handling ---------------------- */
-
-/** Says whether a pixel value should be ignored because it is NaN or the file's nodata marker. */
-const isNoData = (value: number, noData: number | null): boolean => Number.isNaN(value) || value === noData;
 
 /** Returns a sorted copy of the numbers, lowest first. */
 const sortAscending = (numbers: readonly number[]): readonly number[] => [...numbers].sort((a, b) => a - b);
@@ -230,8 +197,7 @@ export const createIsoBandsFromGeotiff = async (
   // Validate the options before doing any heavy work.
   const thresholdBands = given === 3 ? createThresholdBands(min!, max!, interval!) : undefined;
 
-  const image = await loadFirstImage(buffer);
-  const grid = await readRasterGrid(image);
+  const grid = await readRasterGrid(buffer);
   await yieldToMain();
 
   // Threshold mode skips the full pass that collects every distinct raster value.

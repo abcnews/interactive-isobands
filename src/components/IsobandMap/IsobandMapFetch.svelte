@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { FeatureCollection } from 'geojson';
+  import { fetchGeotiff } from '../../lib/fetchgeotiff.ts';
+  import { inview } from '../../lib/inview.ts';
   import { createIsobandsInWorker } from '../../lib/createisobandsworker.ts';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import type { ProjectionId } from '../../lib/geo.ts';
@@ -31,13 +33,6 @@
   /** Latches true the first time the map gets near the viewport. */
   let near = $state(false);
 
-  /** Attachment: flips `near` once the node is within rootMargin of the viewport. */
-  const inview = (node: HTMLElement) => {
-    const io = new IntersectionObserver(([e]) => e.isIntersecting && ((near = true), io.disconnect()), { rootMargin });
-    io.observe(node);
-    return () => io.disconnect();
-  };
-
   let buffer = $state.raw<ArrayBuffer>();
   let bands = $state.raw<FeatureCollection>();
   let error = $state<string>();
@@ -49,18 +44,8 @@
     bands = undefined;
     error = undefined;
 
-    fetch(url, { signal: controller.signal })
-      .then((response) => {
-        // Anything other than 200 is a failure: 3xx that wasn't followed, 4xx, 5xx,
-        // and 204/206 which succeed per `response.ok` but don't carry a full GeoTIFF.
-        if (response.status !== 200) {
-          const reason = response.statusText ? ` ${response.statusText}` : '';
-          throw new Error(`server responded with ${response.status}${reason}`);
-        }
-        return response.arrayBuffer();
-      })
+    fetchGeotiff(url, controller.signal)
       .then((data) => {
-        if (!data.byteLength) throw new Error('the response was empty');
         buffer = data;
       })
       .catch((e) => {
@@ -95,6 +80,6 @@
   });
 </script>
 
-<div {@attach inview}>
+<div {@attach inview(rootMargin, () => (near = true))}>
   <IsobandMap {bands} {alt} {error} {projection} />
 </div>
