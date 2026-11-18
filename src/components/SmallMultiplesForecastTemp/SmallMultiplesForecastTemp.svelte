@@ -3,7 +3,7 @@
   import { SequentialPalette, createContinuousScale } from '@abcnews/palette';
   import ausMd from '../../aus-md.json';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
-  import { DATA_BASE_URL, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
+  import { DATA_BASE_URL, forecastTitle, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
   import { colourScheme, createSummerHeatPalette, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
   import { createGradientScale, createSteppedScale } from '../../lib/rastergrid.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
@@ -65,7 +65,10 @@
   /** Default days shown, as 3 columns x 2 rows on desktop and 2 columns x 3 rows on mobile. */
   const DEFAULT_DAYS = 6;
 
-  const forecasts = resolveDateRange({ start, startOffset, days, defaultDays: DEFAULT_DAYS }).map(ymd => ({
+  const dates = resolveDateRange({ start, startOffset, days, defaultDays: DEFAULT_DAYS });
+  const title = forecastTitle({ dates });
+
+  const forecasts = dates.map(ymd => ({
     key: ymd,
     label: formatPanelDate(ymd),
     url: `${DATA_BASE_URL}/ifs-t2m/${ymd}/${filename}`
@@ -75,7 +78,7 @@
 <SmallMultiples items={forecasts} showLabels={isShown('DATES')}>
   {#snippet heading()}
     {#if isShown('TITLE')}
-      <ABCHeading centre>High temperature forecast</ABCHeading>
+      <ABCHeading centre>{title}</ABCHeading>
     {/if}
     {#if isShown('LEGEND')}
       <div class="legend">

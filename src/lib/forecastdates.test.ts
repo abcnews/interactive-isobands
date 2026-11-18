@@ -1,5 +1,51 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, DAYS_AHEAD, formatPanelDate, ordinal, resolveDateRange } from './forecastdates.ts';
+import { addDays, DAYS_AHEAD, forecastTitle, formatPanelDate, ordinal, resolveDateRange } from './forecastdates.ts';
+
+/** Consecutive YYYY-MM-DD dates from `start`. */
+const run = (start: string, length: number) => Array.from({ length }, (_, i) => addDays(start, i));
+
+describe('forecastTitle', () => {
+  // A Sunday.
+  const today = '2026-10-18';
+
+  it('says "the next week" for a week starting today or tomorrow', () => {
+    expect(forecastTitle({ dates: run(today, 6), today })).toBe('High-temperature forecast for the next week');
+    expect(forecastTitle({ dates: run('2026-10-19', 6), today })).toBe('High-temperature forecast for the next week');
+  });
+
+  it('gives dates for a week that starts later', () => {
+    expect(forecastTitle({ dates: run('2026-10-20', 6), today })).toBe('High-temperature forecast for Tuesday 20–25 Oct');
+  });
+
+  it('names today and tomorrow for a single day', () => {
+    expect(forecastTitle({ dates: [today], today })).toBe('High-temperature forecast for today, Sunday 18 Oct');
+    expect(forecastTitle({ dates: ['2026-10-19'], today })).toBe('High-temperature forecast for tomorrow, Monday 19 Oct');
+    expect(forecastTitle({ dates: ['2026-10-21'], today })).toBe('High-temperature forecast for Wednesday 21 Oct');
+  });
+
+  it('shows one month for a range within a month', () => {
+    expect(forecastTitle({ dates: run(today, 3), today })).toBe('High-temperature forecast for Sunday 18–20 Oct');
+  });
+
+  it('shows both months for a range across months', () => {
+    expect(forecastTitle({ dates: run('2026-10-30', 4), today })).toBe('High-temperature forecast for Friday 30 Oct–2 Nov');
+  });
+
+  it('adds the year when it is not the current one', () => {
+    expect(forecastTitle({ dates: run('2023-10-15', 3), today })).toBe('High-temperature forecast for Sunday 15–17 Oct 2023');
+    expect(forecastTitle({ dates: ['2023-10-15'], today })).toBe('High-temperature forecast for Sunday 15 Oct 2023');
+  });
+
+  it('shows both years for a range across years', () => {
+    expect(forecastTitle({ dates: run('2023-12-30', 4), today })).toBe(
+      'High-temperature forecast for Saturday 30 Dec 2023–2 Jan 2024'
+    );
+  });
+
+  it('falls back to the plain title with no dates', () => {
+    expect(forecastTitle({ dates: [], today })).toBe('High-temperature forecast');
+  });
+});
 
 describe('addDays', () => {
   it('moves across month and year ends, forwards and back', () => {

@@ -43,6 +43,71 @@ export const formatPanelDate = (ymd: string) => {
   return `${weekday},\n${month} the ${ordinal(date.getUTCDate())}`;
 };
 
+// ---------------------------------------------------------------------------
+// Titles
+// ---------------------------------------------------------------------------
+
+const TITLE_PREFIX = 'High-temperature forecast';
+/** Runs at least this long that start today or tomorrow are called "the next week" rather than given dates. */
+const NEXT_WEEK_MIN_DAYS = 6;
+
+/** The pieces of a YYYY-MM-DD date a title is built from, e.g. Sunday / 18 / Oct / 2026. */
+const titleParts = (ymd: string) => {
+  const date = new Date(`${ymd}T12:00:00Z`);
+  const format = (options: Intl.DateTimeFormatOptions) =>
+    date.toLocaleDateString('en-AU', { ...options, timeZone: 'UTC' });
+  return {
+    weekday: format({ weekday: 'long' }),
+    day: date.getUTCDate(),
+    month: format({ month: 'short' }),
+    year: date.getUTCFullYear()
+  };
+};
+
+/** "Sunday 18 Oct", plus the year when it isn't the current one. */
+const describeDay = (ymd: string, currentYear: number) => {
+  const { weekday, day, month, year } = titleParts(ymd);
+  return [weekday, day, month, year !== currentYear && year].filter(Boolean).join(' ');
+};
+
+/**
+ * "Sunday 18–20 Oct", "Friday 30 Oct–2 Nov", "Saturday 30 Dec 2023–2 Jan 2024".
+ * The month (and year) is only repeated on the start when it differs from the end.
+ */
+const describeRange = (first: string, last: string, currentYear: number) => {
+  const [start, end] = [titleParts(first), titleParts(last)];
+  const yearsDiffer = start.year !== end.year;
+  const showYear = yearsDiffer || end.year !== currentYear;
+  const startText = [start.weekday, start.day, (yearsDiffer || start.month !== end.month) && start.month, yearsDiffer && start.year];
+  const endText = [end.day, end.month, showYear && end.year];
+  return `${startText.filter(Boolean).join(' ')}–${endText.filter(Boolean).join(' ')}`;
+};
+
+/**
+ * A title describing the dates shown, so an evergreen embed never says the wrong thing:
+ * - a week or so from today or tomorrow: "…for the next week"
+ * - one day: "…for today, Sunday 18 Oct" (or "tomorrow, …", or just the date)
+ * - otherwise the range: "…for Sunday 18–20 Oct", with the year only when it isn't this year.
+ */
+export const forecastTitle = ({ dates, today = todayInSydney() }: { dates: string[]; today?: string }) => {
+  const [first, last] = [dates[0], dates.at(-1)];
+  if (!first || !last) return TITLE_PREFIX;
+
+  const tomorrow = addDays(today, 1);
+  const currentYear = Number(today.slice(0, 4));
+
+  if (dates.length >= NEXT_WEEK_MIN_DAYS && (first === today || first === tomorrow)) {
+    return `${TITLE_PREFIX} for the next week`;
+  }
+
+  if (dates.length === 1) {
+    const relativeDay = { [today]: 'today, ', [tomorrow]: 'tomorrow, ' }[first] ?? '';
+    return `${TITLE_PREFIX} for ${relativeDay}${describeDay(first, currentYear)}`;
+  }
+
+  return `${TITLE_PREFIX} for ${describeRange(first, last, currentYear)}`;
+};
+
 /** A YYYY-MM-DD date moved by a whole number of days (negative goes back). */
 export const addDays = (ymd: string, days: number) =>
   // Midnight UTC has no DST, so every day is exactly MS_PER_DAY long.
