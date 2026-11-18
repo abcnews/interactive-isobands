@@ -21,6 +21,8 @@
     days?: string | null;
     /** Items to show, `|` separated: TITLE|LEGEND|DATES|ATTRIBUTION (case-insensitive). When set, anything not listed is hidden. */
     show?: string | null;
+    /** Items to hide, `|` separated, same names as `show`. Applied after `show`. */
+    hide?: string | null;
     /** `raster` draws interpolated canvases from continuous values; anything else (default) draws vector isobands from the banded file. */
     renderer?: string | null;
     /** Filename in each date's folder. Defaults to `aus.tiff` for the raster renderer and `aus-banded.tiff` otherwise. */
@@ -32,10 +34,14 @@
     max?: string | null;
   };
 
-  let { start, startOffset, days, show, renderer, file, look, min, max }: Props = $props();
+  let { start, startOffset, days, show, hide, renderer, file, look, min, max }: Props = $props();
 
-  const visible = show ? new Set(show.toUpperCase().split('|').map(item => item.trim())) : undefined;
-  const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => !visible || visible.has(item);
+  /** `TITLE|dates` → Set { 'TITLE', 'DATES' } */
+  const parseItems = (list?: string | null) => new Set(list?.toUpperCase().split('|').map(item => item.trim()));
+
+  // An item shows if `show` lists it (or isn't set) and `hide` doesn't.
+  const [shown, hidden] = [parseItems(show), parseItems(hide)];
+  const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => (!show || shown.has(item)) && !hidden.has(item);
 
   const ausClip = ausMd as GeoJsonInput;
 
