@@ -66,7 +66,8 @@
    * (25, 30 … 45) and both ends are arrows, as the outer bands are open-ended.
    */
   const legendSwatches = $derived(summerHeatColours(colourScheme.mode).map(colour => ({ colour })));
-  const legendTicks = SUMMER_HEAT_THRESHOLDS.map(threshold => `${threshold}°`);
+  // Units on the last tick only, to keep the scale uncluttered: 25 30 35 40 45°C.
+  const legendTicks = SUMMER_HEAT_THRESHOLDS.map((threshold, i, all) => (i === all.length - 1 ? `${threshold}°C` : `${threshold}`));
 
   /** Default days shown, as 3 columns x 2 rows on desktop and 2 columns x 3 rows on mobile. */
   const DEFAULT_DAYS = 6;
@@ -88,7 +89,13 @@
     {/if}
     {#if isShown('LEGEND')}
       <div class="legend">
-        <ModularLegend discreteLegends={legendSwatches} betweenTicks={legendTicks} continues="both" />
+        <ModularLegend
+          discreteLegends={legendSwatches}
+          betweenTicks={legendTicks}
+          continues="both"
+          startAnnotation="Cooler"
+          endAnnotation="Hotter"
+        />
       </div>
     {/if}
   {/snippet}
