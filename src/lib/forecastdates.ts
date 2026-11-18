@@ -43,6 +43,11 @@ export const formatPanelDate = (ymd: string) => {
   return `${weekday},\n${month} the ${ordinal(date.getUTCDate())}`;
 };
 
+/** A YYYY-MM-DD date moved by a whole number of days (negative goes back). */
+export const addDays = (ymd: string, days: number) =>
+  // Midnight UTC has no DST, so every day is exactly MS_PER_DAY long.
+  new Date(new Date(`${ymd}T00:00:00Z`).getTime() + days * MS_PER_DAY).toISOString().slice(0, 10);
+
 /** Every available date from FIRST_DATE to today + DAYS_AHEAD, inclusive. */
 export const availableDates = (today: string) => {
   // Midnight UTC has no DST, so every day is exactly MS_PER_DAY long.
@@ -50,9 +55,7 @@ export const availableDates = (today: string) => {
   const lastMs = new Date(`${today}T00:00:00Z`).getTime() + DAYS_AHEAD * MS_PER_DAY;
   const dayCount = Math.max(0, Math.round((lastMs - firstMs) / MS_PER_DAY) + 1);
 
-  return Array.from({ length: dayCount }).map((_, i) =>
-    new Date(firstMs + i * MS_PER_DAY).toISOString().slice(0, 10)
-  );
+  return Array.from({ length: dayCount }).map((_, i) => addDays(FIRST_DATE, i));
 };
 
 /**
@@ -60,14 +63,21 @@ export const availableDates = (today: string) => {
  * Why clamp rather than reject: a stale or hand-edited embed URL should still show a map,
  * not a blank frame. An unparseable start means "today"; a start outside the available
  * range is moved to the nearest edge; the run is shortened so it never passes the last date.
+ *
+ * `startOffset` exists for evergreen embeds: `startOffset=1` always starts on the day after the
+ * reader views it, where a fixed `start` would go stale. It moves "today" by n days, so it only
+ * applies when there is no valid `start`; a fixed date wins because it is the more specific ask.
  */
 export const resolveDateRange = ({
   start,
+  startOffset,
   days,
   defaultDays,
   today = todayInSydney()
 }: {
   start?: string | null;
+  /** Whole days to add to today (negative goes back) when `start` is not set. Defaults to 0. */
+  startOffset?: string | null;
   days?: string | null;
   defaultDays: number;
   today?: string;
@@ -76,7 +86,9 @@ export const resolveDateRange = ({
   const [first, last] = [dates[0], dates[dates.length - 1]];
 
   const isValidStart = !!start && ISO_DATE.test(start) && !Number.isNaN(Date.parse(`${start}T00:00:00Z`));
-  const requestedStart = isValidStart ? start : today;
+  const offsetDays = Math.trunc(Number(startOffset ?? 0));
+  const relativeStart = addDays(today, Number.isFinite(offsetDays) ? offsetDays : 0);
+  const requestedStart = isValidStart ? start : relativeStart;
   const clampedStart = requestedStart < first ? first : requestedStart > last ? last : requestedStart;
 
   const requestedDays = Math.floor(Number(days ?? defaultDays));

@@ -15,6 +15,8 @@
   type Props = {
     /** First day, YYYY-MM-DD. Defaults to today (Sydney); clamped to the dates that have data. */
     start?: string | null;
+    /** Days to add to today (Sydney) for an evergreen start, e.g. `1` for tomorrow. Ignored when `start` is set. */
+    startOffset?: string | null;
     /** Number of days, as a string from the URL hash. Defaults to 6; shortened if it would pass the last available date. */
     days?: string | null;
     /** Items to show, `|` separated: TITLE|LEGEND|DATES|ATTRIBUTION (case-insensitive). When set, anything not listed is hidden. */
@@ -30,7 +32,7 @@
     max?: string | null;
   };
 
-  let { start, days, show, renderer, file, look, min, max }: Props = $props();
+  let { start, startOffset, days, show, renderer, file, look, min, max }: Props = $props();
 
   const visible = show ? new Set(show.toUpperCase().split('|').map(item => item.trim())) : undefined;
   const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => !visible || visible.has(item);
@@ -63,7 +65,7 @@
   /** Default days shown, as 3 columns x 2 rows on desktop and 2 columns x 3 rows on mobile. */
   const DEFAULT_DAYS = 6;
 
-  const forecasts = resolveDateRange({ start, days, defaultDays: DEFAULT_DAYS }).map(ymd => ({
+  const forecasts = resolveDateRange({ start, startOffset, days, defaultDays: DEFAULT_DAYS }).map(ymd => ({
     key: ymd,
     label: formatPanelDate(ymd),
     url: `${DATA_BASE_URL}/ifs-t2m/${ymd}/${filename}`
