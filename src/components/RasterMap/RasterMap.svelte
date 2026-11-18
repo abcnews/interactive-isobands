@@ -1,11 +1,11 @@
 <script lang="ts">
-  import type { RasterLayout } from '../../lib/rastergrid.ts';
+  import type { RasterImage, RasterLayout } from '../../lib/rastergrid.ts';
 
   interface Props {
-    /** Projection fit shared by the panels of a set. Reserves the right space before pixels arrive. */
+    /** Projection fit shared by the panels of a set. Reserves the right space before an image arrives. */
     layout?: RasterLayout;
-    /** RGBA pixels, `layout.width` x `layout.height`, already cropped to the boundary. Draws an empty placeholder until supplied. */
-    pixels?: Uint8ClampedArray;
+    /** Rendered pixels, already cropped to the boundary. Draws an empty placeholder until supplied. */
+    image?: RasterImage;
     /** Alt text describing the map for screen readers. */
     alt?: string;
     /** Shown in place of the map. */
@@ -14,32 +14,40 @@
     placeholderRatio?: number;
   }
 
-  let { layout, pixels, alt = 'Raster map', error, placeholderRatio = 4 / 3 }: Props = $props();
+  let { layout, image, alt = 'Raster map', error, placeholderRatio = 4 / 3 }: Props = $props();
 
   let canvas = $state<HTMLCanvasElement>();
 
+  /*
+   * The canvas is sized from the image, not the layout. When the panel resizes the layout changes straight
+   * away but the new image takes a worker round trip. Sizing from the layout would clear the canvas (any change
+   * to its width/height does) and leave old pixels that no longer match its size, which `ImageData` rejects.
+   * Sized from the image, the old render stays on screen, scaled by CSS, until the new one replaces it.
+   */
+  const canvasSize = $derived(image ?? layout);
+
   $effect(() => {
     const context = canvas?.getContext('2d');
-    if (!canvas || !context || !layout || !pixels) return;
-    const { width, height } = layout;
+    if (!context || !image) return;
+    const { width, height, pixels } = image;
 
     context.clearRect(0, 0, width, height);
     context.putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
   });
 </script>
 
-<figure aria-busy={!pixels && !error}>
+<figure aria-busy={!image && !error}>
   {#if error}
     <div class="map message" style:aspect-ratio={placeholderRatio} role="alert">{error}</div>
-  {:else if !layout}
+  {:else if !canvasSize}
     <div class="map" style:aspect-ratio={placeholderRatio}></div>
   {:else}
     <canvas
       bind:this={canvas}
       class="map"
-      class:ready={!!pixels}
-      width={layout.width}
-      height={layout.height}
+      class:ready={!!image}
+      width={canvasSize.width}
+      height={canvasSize.height}
       role="img"
       aria-label={alt}
     ></canvas>

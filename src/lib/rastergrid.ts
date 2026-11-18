@@ -274,6 +274,9 @@ export type RasterLayout = {
   readonly boundary: readonly PixelRing[];
 };
 
+/** A finished render, carrying the size it was rendered at so it can't be drawn onto a canvas of another size. */
+export type RasterImage = { width: number; height: number; pixels: Uint8ClampedArray };
+
 export type RenderResult = {
   /** RGBA, `layout.width` x `layout.height`, transparent where there's no data or outside the boundary. */
   pixels: Uint8ClampedArray;

@@ -7,7 +7,8 @@
     choosePixelWidth,
     createRasterLayout,
     renderRasterInWorker,
-    type ColourScale
+    type ColourScale,
+    type RasterImage
   } from '../../lib/rastergrid.ts';
   import RasterMap from './RasterMap.svelte';
 
@@ -31,18 +32,38 @@
 
   let near = $state(false);
   let buffer = $state.raw<ArrayBuffer>();
-  let pixels = $state.raw<Uint8ClampedArray>();
+  let image = $state.raw<RasterImage>();
   let error = $state<string>();
 
-  /** On-screen width of the panel in CSS pixels, 0 until measured. */
+  // ---- Panel width ----
+
+  /** Wait this long after the last resize before re-rendering, so dragging a window doesn't queue a render per step. */
+  const RESIZE_DEBOUNCE_MS = 250;
+
+  /** Widest on-screen width of the panel so far, in CSS pixels; 0 until measured. */
   let cssWidth = $state(0);
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Grow-only: a too-big canvas scales down sharply, so only growing (debounced) triggers a re-render. */
+  const updateCssWidth = (measured: number) => {
+    if (measured <= cssWidth) return;
+    clearTimeout(resizeTimer);
+    if (!cssWidth) {
+      cssWidth = measured;
+      return;
+    }
+    resizeTimer = setTimeout(() => (cssWidth = Math.max(cssWidth, measured)), RESIZE_DEBOUNCE_MS);
+  };
+
+  $effect(() => () => clearTimeout(resizeTimer));
+
   const pixelWidth = $derived(fixedPixelWidth ?? choosePixelWidth(cssWidth, window.devicePixelRatio));
   const layout = $derived(pixelWidth ? createRasterLayout(projection, clipTo, pixelWidth) : undefined);
 
   // 1. Preload: start fetching the GeoTIFF immediately, abort if the url changes.
   $effect(() => {
     const controller = new AbortController();
-    buffer = pixels = error = undefined;
+    buffer = image = error = undefined;
 
     fetchGeotiff(url, controller.signal)
       .then((data) => {
@@ -57,15 +78,16 @@
     return () => controller.abort();
   });
 
-  // 2. Render: only once the data is ready AND the map is near the viewport. Re-runs on a new colour scale.
+  // 2. Render: only once the data is ready AND the map is near the viewport. Re-runs on a new colour scale or
+  // a wider layout; the previous image stays on screen until the new one arrives.
   $effect(() => {
     if (!near || !buffer || !layout) return;
     const [data, currentLayout, scale] = [buffer, layout, colourScale];
     let stale = false;
 
     renderRasterInWorker(data, currentLayout, scale)
-      .then(({ pixels: result }) => {
-        if (!stale) pixels = result;
+      .then(({ pixels }) => {
+        if (!stale) image = { width: currentLayout.width, height: currentLayout.height, pixels };
       })
       .catch((e) => {
         if (stale) return;
@@ -79,6 +101,6 @@
   });
 </script>
 
-<div {@attach inview(rootMargin, () => (near = true))} bind:clientWidth={cssWidth}>
-  <RasterMap {layout} {pixels} {alt} {error} />
+<div {@attach inview(rootMargin, () => (near = true))} bind:clientWidth={() => cssWidth, updateCssWidth}>
+  <RasterMap {layout} {image} {alt} {error} />
 </div>
