@@ -12,7 +12,7 @@
 <p class="abc-attribution">{@render children()}</p>
 
 <style>
-  /* Typography matches ABC figure captions; colours are inherited so the host page controls them. */
+  /* ABC "Text Regular/xs"; colours are inherited so the host page controls them. */
   .abc-attribution {
     box-sizing: border-box;
     margin: 0;
@@ -20,7 +20,7 @@
     font-family: abcsans, 'fallback sans', sans-serif;
     font-size: 12px;
     font-weight: 400;
-    line-height: 20px;
+    line-height: 1.35;
 
     :global(a) {
       color: inherit;

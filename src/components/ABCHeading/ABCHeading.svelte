@@ -15,15 +15,19 @@
 <h1 class="abc-heading" class:abc-heading--centre={centre}>{@render children()}</h1>
 
 <style>
-  /* Matches ABC article h2 typography; colour is inherited so the host page controls it. */
+  /*
+   * ABC "Viz Heading Bold/xs", the same at every width. No margin: the parent layout sets the spacing.
+   * Colour is inherited so the host page controls it, including dark mode.
+   */
   .abc-heading {
     box-sizing: border-box;
-    margin: 40px 0 16px;
+    margin: 0;
     color: inherit;
     font-family: abcsans, 'fallback sans', sans-serif;
-    font-size: 32px;
+    font-size: 18px;
     font-weight: 700;
-    line-height: 40px;
+    line-height: 1.25;
+    text-wrap: balance;
   }
 
   .abc-heading--centre {

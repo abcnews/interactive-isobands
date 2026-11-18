@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { ModularLegend } from '@abcnews/components-dataviz';
   import { SequentialPalette, createContinuousScale } from '@abcnews/palette';
   import ausMd from '../../aus-md.json';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
-  import { DATA_BASE_URL, resolveDateRange } from '../../lib/forecastdates.ts';
+  import { DATA_BASE_URL, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
   import { colourScheme, createSummerHeatPalette, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
   import { createGradientScale, createSteppedScale } from '../../lib/rastergrid.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
@@ -16,7 +17,7 @@
     start?: string | null;
     /** Number of days, as a string from the URL hash. Defaults to 6; shortened if it would pass the last available date. */
     days?: string | null;
-    /** Items to show, `|` separated: TITLE|DATES|ATTRIBUTION (case-insensitive). When set, anything not listed is hidden. */
+    /** Items to show, `|` separated: TITLE|LEGEND|DATES|ATTRIBUTION (case-insensitive). When set, anything not listed is hidden. */
     show?: string | null;
     /** `raster` draws interpolated canvases from continuous values; anything else (default) draws vector isobands from the banded file. */
     renderer?: string | null;
@@ -32,7 +33,7 @@
   let { start, days, show, renderer, file, look, min, max }: Props = $props();
 
   const visible = show ? new Set(show.toUpperCase().split('|').map(item => item.trim())) : undefined;
-  const isShown = (item: 'TITLE' | 'DATES' | 'ATTRIBUTION') => !visible || visible.has(item);
+  const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => !visible || visible.has(item);
 
   const ausClip = ausMd as GeoJsonInput;
 
@@ -52,18 +53,19 @@
       : createSteppedScale(SUMMER_HEAT_THRESHOLDS, summerHeatColours(colourScheme.mode))
   );
 
+  /**
+   * Legend swatches: grey for under 25, then one red per band. Labels sit on the boundaries
+   * (25, 30 … 45) and both ends are arrows, as the outer bands are open-ended.
+   */
+  const legendSwatches = $derived(summerHeatColours(colourScheme.mode).map(colour => ({ colour })));
+  const legendTicks = SUMMER_HEAT_THRESHOLDS.map(threshold => `${threshold}°`);
+
   /** Default days shown, as 3 columns x 2 rows on desktop and 2 columns x 3 rows on mobile. */
   const DEFAULT_DAYS = 6;
 
   const forecasts = resolveDateRange({ start, days, defaultDays: DEFAULT_DAYS }).map(ymd => ({
     key: ymd,
-    // Noon UTC so the label stays on the right calendar day in any browser time zone.
-    label: new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-AU', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'short',
-      timeZone: 'UTC'
-    }),
+    label: formatPanelDate(ymd),
     url: `${DATA_BASE_URL}/ifs-t2m/${ymd}/${filename}`
   }));
 </script>
@@ -73,10 +75,15 @@
     {#if isShown('TITLE')}
       <ABCHeading centre>High temperature forecast</ABCHeading>
     {/if}
+    {#if isShown('LEGEND')}
+      <div class="legend">
+        <ModularLegend discreteLegends={legendSwatches} betweenTicks={legendTicks} continues="both" />
+      </div>
+    {/if}
   {/snippet}
 
   {#snippet panel(forecast)}
-    {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label}`}
+    {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label.replace('\n', ' ')}`}
     {#if isRaster}
       <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} />
     {:else}
@@ -87,10 +94,21 @@
   {#snippet caption()}
     {#if isShown('ATTRIBUTION')}
       <ABCAttribution>
-        Data: <a href="https://www.ecmwf.int/en/forecasts/datasets">ECMWF</a>, © {new Date().getFullYear()} ECMWF,
+        Source: <a href="https://www.ecmwf.int/en/forecasts/datasets">ECMWF</a>, © {new Date().getFullYear()} ECMWF,
         <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>, modified into contour bands. ECMWF accepts
         no liability for errors, omissions, availability or loss from use.
       </ABCAttribution>
     {/if}
   {/snippet}
 </SmallMultiples>
+
+<style>
+  /* The legend caps its swatch widths and left-aligns them, so shrink-wrap it to centre under the heading. */
+  .legend {
+    width: fit-content;
+    max-width: 100%;
+    margin-inline: auto;
+    /* Extra space before the maps, on top of the figure's grid gap. */
+    margin-block-end: 10px;
+  }
+</style>

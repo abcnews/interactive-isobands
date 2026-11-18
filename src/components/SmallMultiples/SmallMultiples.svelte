@@ -16,7 +16,7 @@
     showLabels?: boolean;
   }
 
-  let { items, heading, panel, caption, desktopMinWidth = 544, showLabels = true }: Props = $props();
+  let { items, heading, panel, caption, desktopMinWidth = 700, showLabels = true }: Props = $props();
 
   // Measured on the figure itself rather than with a viewport media query: embeds sit in columns and
   // iframes that are narrower than the window, so the viewport width says nothing about the space we have.
@@ -28,7 +28,7 @@
 
 <figure bind:clientWidth={figureWidth}>
   {@render heading?.()}
-  <ul style:grid-template-columns="repeat({columns}, minmax(0, 1fr))">
+  <ul class:desktop={isDesktop} style:grid-template-columns="repeat({columns}, minmax(0, 1fr))">
     {#each items as item (item.key)}
       <li>
         {#if showLabels}<p>{item.label}</p>{/if}
@@ -58,17 +58,27 @@
     @media (max-width: 480px) {
       gap: 2rem;
     }
+    /* Three-column layout: tighter rows than columns, per the design. */
+    &.desktop {
+      gap: 24px 35px;
+    }
   }
 
   li {
     min-width: 0;
   }
 
-  /* Matches ABC article paragraph typography; colour is inherited from the host page. */
+  /*
+   * ABC "Text Regular/md" at every width; colour is inherited from the host page.
+   * pre-line honours line breaks in the label (e.g. after the weekday).
+   */
   li p {
     margin: 0 0 8px;
-    font-size: 18px;
-    line-height: 27px;
+    font-family: abcsans, 'fallback sans', sans-serif;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.5;
     text-align: center;
+    white-space: pre-line;
   }
 </style>

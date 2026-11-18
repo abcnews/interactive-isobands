@@ -13,6 +13,36 @@ export const todayInSydney = () => new Intl.DateTimeFormat('en-CA', { timeZone: 
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
+// ---------------------------------------------------------------------------
+// Date labels
+// ---------------------------------------------------------------------------
+
+const ORDINAL_SUFFIXES: Record<Intl.LDMLPluralRule, string> = {
+  one: 'st',
+  two: 'nd',
+  few: 'rd',
+  other: 'th',
+  zero: 'th',
+  many: 'th'
+};
+const ordinalRules = new Intl.PluralRules('en-AU', { type: 'ordinal' });
+
+/** 1 → "1st", 22 → "22nd", 13 → "13th". */
+export const ordinal = (value: number) => `${value}${ORDINAL_SUFFIXES[ordinalRules.select(value)]}`;
+
+/**
+ * A YYYY-MM-DD date as "Wednesday,\nJanuary the 29th". The newline puts the weekday on its own
+ * line when rendered with `white-space: pre-line`. Read at noon UTC so the label stays on the
+ * right calendar day in any browser time zone.
+ */
+export const formatPanelDate = (ymd: string) => {
+  const date = new Date(`${ymd}T12:00:00Z`);
+  const [weekday, month] = (['weekday', 'month'] as const).map(part =>
+    date.toLocaleDateString('en-AU', { [part]: 'long', timeZone: 'UTC' })
+  );
+  return `${weekday},\n${month} the ${ordinal(date.getUTCDate())}`;
+};
+
 /** Every available date from FIRST_DATE to today + DAYS_AHEAD, inclusive. */
 export const availableDates = (today: string) => {
   // Midnight UTC has no DST, so every day is exactly MS_PER_DAY long.
