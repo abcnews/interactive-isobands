@@ -1,5 +1,7 @@
 <script lang="ts">
-  import type { RasterImage, RasterLayout } from '../../lib/rastergrid.ts';
+  import type { MapLineLayer } from '../../lib/maplines.ts';
+  import { projectionFromLayout, type RasterImage, type RasterLayout } from '../../lib/rastergrid.ts';
+  import MapLines from '../MapLines/MapLines.svelte';
 
   interface Props {
     /** Projection fit shared by the panels of a set. Reserves the right space before an image arrives. */
@@ -12,9 +14,14 @@
     error?: string;
     /** Width / height of the space reserved while there is no layout. */
     placeholderRatio?: number;
+    /** Lines drawn over the map, e.g. state borders and roads. */
+    lineLayers?: MapLineLayer[];
   }
 
-  let { layout, image, alt = 'Raster map', error, placeholderRatio = 4 / 3 }: Props = $props();
+  let { layout, image, alt = 'Raster map', error, placeholderRatio = 4 / 3, lineLayers = [] }: Props = $props();
+
+  /** Lines are projected in the layout's pixel space; the SVG's viewBox then scales them with the canvas. */
+  const lineProjection = $derived(layout && lineLayers.length ? projectionFromLayout(layout) : undefined);
 
   let canvas = $state<HTMLCanvasElement>();
 
@@ -42,15 +49,21 @@
   {:else if !canvasSize}
     <div class="map" style:aspect-ratio={placeholderRatio}></div>
   {:else}
-    <canvas
-      bind:this={canvas}
-      class="map"
-      class:ready={!!image}
-      width={canvasSize.width}
-      height={canvasSize.height}
-      role="img"
-      aria-label={alt}
-    ></canvas>
+    <div class="frame" class:ready={!!image}>
+      <canvas
+        bind:this={canvas}
+        class="map"
+        width={canvasSize.width}
+        height={canvasSize.height}
+        role="img"
+        aria-label={alt}
+      ></canvas>
+      {#if layout && lineProjection}
+        <svg class="lines" viewBox="0 0 {layout.width} {layout.height}" aria-hidden="true">
+          <MapLines projection={lineProjection} layers={lineLayers} />
+        </svg>
+      {/if}
+    </div>
   {/if}
 </figure>
 
@@ -70,13 +83,24 @@
     height: auto;
   }
 
-  canvas {
+  /* The lines fade in with the picture, so they never show over an empty panel. */
+  .frame {
+    position: relative;
+    width: 100%;
     opacity: 0;
     transition: opacity 0.25s;
   }
 
-  canvas.ready {
+  .frame.ready {
     opacity: 1;
+  }
+
+  .lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
   }
 
   .message {

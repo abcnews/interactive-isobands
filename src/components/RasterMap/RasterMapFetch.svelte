@@ -3,6 +3,7 @@
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import type { ProjectionId } from '../../lib/geo.ts';
   import { inview } from '../../lib/inview.ts';
+  import type { MapLineLayer } from '../../lib/maplines.ts';
   import {
     choosePixelWidth,
     createRasterLayout,
@@ -26,9 +27,12 @@
     pixelWidth?: number;
     /** How far outside the viewport (CSS margin syntax) the render starts. */
     rootMargin?: string;
+    /** Lines drawn over the map, e.g. state borders and roads. */
+    lineLayers?: MapLineLayer[];
   }
 
-  let { url, alt, projection, clipTo, colourScale, pixelWidth: fixedPixelWidth, rootMargin = '600px' }: Props = $props();
+  let { url, alt, projection, clipTo, colourScale, pixelWidth: fixedPixelWidth, rootMargin = '600px', lineLayers }: Props =
+    $props();
 
   let near = $state(false);
   let buffer = $state.raw<ArrayBuffer>();
@@ -102,5 +106,5 @@
 </script>
 
 <div {@attach inview(rootMargin, () => (near = true))} bind:clientWidth={() => cssWidth, updateCssWidth}>
-  <RasterMap {layout} {image} {alt} {error} />
+  <RasterMap {layout} {image} {alt} {error} {lineLayers} />
 </div>

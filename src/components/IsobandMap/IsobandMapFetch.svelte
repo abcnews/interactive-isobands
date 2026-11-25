@@ -5,6 +5,7 @@
   import { createIsobandsInWorker } from '../../lib/createisobandsworker.ts';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import type { ProjectionId } from '../../lib/geo.ts';
+  import type { MapLineLayer } from '../../lib/maplines.ts';
   import IsobandMap from './IsobandMap.svelte';
 
   interface Props {
@@ -26,9 +27,11 @@
     min?: number;
     max?: number;
     interval?: number;
+    /** Lines drawn over the bands, e.g. state borders and roads. */
+    lineLayers?: MapLineLayer[];
   }
 
-  let { url, alt,projection, rootMargin = '600px', clipTo, palette, min, max, interval }: Props = $props();
+  let { url, alt, projection, rootMargin = '600px', clipTo, palette, min, max, interval, lineLayers }: Props = $props();
 
   /** Latches true the first time the map gets near the viewport. */
   let near = $state(false);
@@ -81,5 +84,5 @@
 </script>
 
 <div {@attach inview(rootMargin, () => (near = true))}>
-  <IsobandMap {bands} {alt} {error} {projection} />
+  <IsobandMap {bands} {alt} {error} {projection} {lineLayers} />
 </div>

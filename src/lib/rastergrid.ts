@@ -274,6 +274,10 @@ export type RasterLayout = {
   readonly boundary: readonly PixelRing[];
 };
 
+/** Rebuilds the fitted projection a layout describes. */
+export const projectionFromLayout = ({ projectionId, centreLon, scale, translate }: RasterLayout) =>
+  PROJECTION_BUILDERS[projectionId].create(centreLon).scale(scale).translate([...translate]);
+
 /** A finished render, carrying the size it was rendered at so it can't be drawn onto a canvas of another size. */
 export type RasterImage = { width: number; height: number; pixels: Uint8ClampedArray };
 
@@ -298,10 +302,7 @@ export const renderRasterPixels = async (
   const key = JSON.stringify({ layout, origin: grid.origin, resolution: grid.resolution, width: grid.width });
   const reusedSampleMap = lastSampleMap?.key === key;
   if (!reusedSampleMap) {
-    const projection = PROJECTION_BUILDERS[layout.projectionId]
-      .create(layout.centreLon)
-      .scale(layout.scale)
-      .translate([...layout.translate]);
+    const projection = projectionFromLayout(layout);
     const coverage = rasteriseBoundary(layout.boundary, layout.width, layout.height);
     lastSampleMap = { key, coverage, map: buildSampleMap(projection, layout, grid, coverage) };
   }

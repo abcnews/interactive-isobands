@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { FeatureCollection } from 'geojson';
   import { buildLayout, type ProjectionId } from '../../lib/geo.ts';
+  import type { MapLineLayer } from '../../lib/maplines.ts';
+  import MapLines from '../MapLines/MapLines.svelte';
 
   interface Props {
     /** Isobands to draw, with simplestyle properties. Draws an empty placeholder until supplied. */
@@ -16,9 +18,12 @@
     centreLon?: number;
     /** Width / height of the space reserved while there is nothing to draw. */
     placeholderRatio?: number;
+    /** Lines drawn over the bands, e.g. state borders and roads. */
+    lineLayers?: MapLineLayer[];
   }
 
   let {
+    lineLayers = [],
     bands,
     alt = 'Isobands map',
     error,
@@ -42,6 +47,7 @@
       {#each layout.paths as { d, fill, fillOpacity, stroke, strokeOpacity, strokeWidth }}
         <path {d} {fill} fill-opacity={fillOpacity} {stroke} stroke-opacity={strokeOpacity} stroke-width={strokeWidth} />
       {/each}
+      <MapLines projection={layout.projection} layers={lineLayers} />
     </svg>
   {/if}
 </figure>

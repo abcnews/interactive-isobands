@@ -5,6 +5,7 @@
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import { DATA_BASE_URL, forecastTitle, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
   import { colourScheme, createSummerHeatPalette, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
+  import { loadAusLineLayers, type MapLineLayer } from '../../lib/maplines.ts';
   import { createGradientScale, createSteppedScale } from '../../lib/rastergrid.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
   import ABCHeading from '../ABCHeading/ABCHeading.svelte';
@@ -44,6 +45,13 @@
   const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => (!show || shown.has(item)) && !hidden.has(item);
 
   const ausClip = ausMd as GeoJsonInput;
+
+  // ---- State borders and roads, drawn over every panel ----
+  // The maps render without them until they arrive; a failed load just leaves them off.
+  let lineLayers = $state.raw<MapLineLayer[]>([]);
+  loadAusLineLayers()
+    .then(layers => (lineLayers = layers))
+    .catch(e => console.error(`[isobands] line layers failed ${JSON.stringify({ error: String(e) })}`));
 
   // Props come from the hash at load and never change, so reading them once is intended.
   const isRaster = renderer === 'raster';
@@ -103,9 +111,9 @@
   {#snippet panel(forecast)}
     {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label.replace('\n', ' ')}`}
     {#if isRaster}
-      <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} />
+      <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
     {:else}
-      <IsobandMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} palette={stepPalette} />
+      <IsobandMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} palette={stepPalette} {lineLayers} />
     {/if}
   {/snippet}
 
