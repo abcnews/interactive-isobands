@@ -110,11 +110,13 @@
 
   {#snippet panel(forecast)}
     {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label.replace('\n', ' ')}`}
-    {#if isRaster}
-      <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
-    {:else}
-      <IsobandMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} palette={stepPalette} {lineLayers} />
-    {/if}
+    <div class="land-shadow">
+      {#if isRaster}
+        <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
+      {:else}
+        <IsobandMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} palette={stepPalette} {lineLayers} />
+      {/if}
+    </div>
   {/snippet}
 
   {#snippet caption()}
@@ -136,5 +138,21 @@
     margin-inline: auto;
     /* Extra space before the maps, on top of the figure's grid gap. */
     margin-block-end: 10px;
+  }
+
+  /*
+   * A soft blur under the landmass, to define the coastline: black on light pages, white on dark ones.
+   * Both renderers leave everything outside the land transparent, so a drop shadow on the map element
+   * follows the coast exactly. The media query matches `colourScheme.mode`, which reads the same query.
+   */
+  .land-shadow {
+    --land-shadow-colour: rgb(0 0 0 / 0.5);
+    @media (prefers-color-scheme: dark) {
+      --land-shadow-colour: rgb(255 255 255 / 0.5);
+    }
+  }
+
+  .land-shadow :global(.map) {
+    filter: drop-shadow(0 0 1px var(--land-shadow-colour));
   }
 </style>
