@@ -4,13 +4,7 @@
   import type { ProjectionId } from '../../lib/geo.ts';
   import { inview } from '../../lib/inview.ts';
   import type { MapLineLayer } from '../../lib/maplines.ts';
-  import {
-    choosePixelWidth,
-    createRasterLayout,
-    renderRasterInWorker,
-    type ColourScale,
-    type RasterImage
-  } from '../../lib/rastergrid.ts';
+  import { choosePixelWidth, createRasterLayout, renderRasterInWorker, type ColourScale } from '../../lib/rastergrid.ts';
   import RasterMap from './RasterMap.svelte';
 
   interface Props {
@@ -19,11 +13,11 @@
     /** Alt text describing the map for screen readers. */
     alt?: string;
     projection: ProjectionId;
-    /** GeoJSON boundary: sets the map's extent and clips the raster to it. */
+    /** GeoJSON boundary: sets the map's extent and is the land clip. */
     clipTo: GeoJsonInput;
     /** Turns interpolated values into colours: stepped for an isoband look, gradient for a smooth one. */
     colourScale: ColourScale;
-    /** Fixed canvas pixel width. By default it follows the panel's on-screen width times the device pixel ratio. */
+    /** Fixed pixel width. By default it follows the panel's on-screen width times the device pixel ratio. */
     pixelWidth?: number;
     /** How far outside the viewport (CSS margin syntax) the render starts. */
     rootMargin?: string;
@@ -36,10 +30,15 @@
 
   let near = $state(false);
   let buffer = $state.raw<ArrayBuffer>();
-  let image = $state.raw<RasterImage>();
+  let imageUrl = $state<string>();
   let error = $state<string>();
 
-  // ---- Panel width ----
+  // ---- Panel size ----
+
+  /** Width the panel's shape is measured at. Fitting is proportional, so any width gives the same aspect ratio. */
+  const NOMINAL_WIDTH = 1000;
+  const nominalLayout = $derived(createRasterLayout(projection, clipTo, NOMINAL_WIDTH));
+  const aspectRatio = $derived(nominalLayout ? nominalLayout.width / nominalLayout.height : 4 / 3);
 
   /** Wait this long after the last resize before re-rendering, so dragging a window doesn't queue a render per step. */
   const RESIZE_DEBOUNCE_MS = 250;
@@ -48,7 +47,7 @@
   let cssWidth = $state(0);
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** Grow-only: a too-big canvas scales down sharply, so only growing (debounced) triggers a re-render. */
+  /** Grow-only: a too-big picture scales down sharply, so only growing (debounced) triggers a re-render. */
   const updateCssWidth = (measured: number) => {
     if (measured <= cssWidth) return;
     clearTimeout(resizeTimer);
@@ -62,18 +61,21 @@
   $effect(() => () => clearTimeout(resizeTimer));
 
   const pixelWidth = $derived(fixedPixelWidth ?? choosePixelWidth(cssWidth, window.devicePixelRatio));
+  /** The panel's one fitted projection: the raster, land clip, borders and roads all draw in its pixel space. */
   const layout = $derived(pixelWidth ? createRasterLayout(projection, clipTo, pixelWidth) : undefined);
+
+  // ---- Data ----
 
   // 1. Preload: start fetching the GeoTIFF immediately, abort if the url changes.
   $effect(() => {
     const controller = new AbortController();
-    buffer = image = error = undefined;
+    buffer = imageUrl = error = undefined;
 
     fetchGeotiff(url, controller.signal)
-      .then((data) => {
+      .then(data => {
         buffer = data;
       })
-      .catch((e) => {
+      .catch(e => {
         if (controller.signal.aborted) return;
         error = `Could not load map data: ${e instanceof Error ? e.message : e}`;
         console.error(`[isobands] fetch failed ${JSON.stringify({ url, error: String(e) })}`);
@@ -83,17 +85,17 @@
   });
 
   // 2. Render: only once the data is ready AND the map is near the viewport. Re-runs on a new colour scale or
-  // a wider layout; the previous image stays on screen until the new one arrives.
+  // a wider layout; the previous picture stays on screen until the new one arrives.
   $effect(() => {
     if (!near || !buffer || !layout) return;
     const [data, currentLayout, scale] = [buffer, layout, colourScale];
     let stale = false;
 
     renderRasterInWorker(data, currentLayout, scale)
-      .then(({ pixels }) => {
-        if (!stale) image = { width: currentLayout.width, height: currentLayout.height, pixels };
+      .then(({ blob }) => {
+        if (!stale) imageUrl = URL.createObjectURL(blob);
       })
-      .catch((e) => {
+      .catch(e => {
         if (stale) return;
         error = `Could not render map: ${e instanceof Error ? e.message : e}`;
         console.error(`[isobands] raster render failed ${JSON.stringify({ url, error: String(e) })}`);
@@ -103,8 +105,16 @@
       stale = true;
     };
   });
+
+  // 3. Free each picture once it's replaced or the panel goes away.
+  $effect(() => {
+    const current = imageUrl;
+    return () => {
+      if (current) URL.revokeObjectURL(current);
+    };
+  });
 </script>
 
-<div {@attach inview(rootMargin, () => (near = true))} bind:clientWidth={() => cssWidth, updateCssWidth}>
-  <RasterMap {layout} {image} {alt} {error} {lineLayers} />
+<div {@attach inview(rootMargin, () => (near = true))}>
+  <RasterMap {layout} {aspectRatio} {imageUrl} {alt} {error} {lineLayers} onresize={updateCssWidth} />
 </div>

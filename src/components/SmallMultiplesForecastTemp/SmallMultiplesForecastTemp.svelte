@@ -4,12 +4,11 @@
   import ausMd from '../../aus-md.json';
   import type { GeoJsonInput } from '../../lib/fastclip.ts';
   import { DATA_BASE_URL, forecastTitle, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
-  import { colourScheme, createSummerHeatPalette, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
+  import { colourScheme, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
   import { loadAusLineLayers, type MapLineLayer } from '../../lib/maplines.ts';
   import { createGradientScale, createSteppedScale } from '../../lib/rastergrid.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
   import ABCHeading from '../ABCHeading/ABCHeading.svelte';
-  import IsobandMapFetch from '../IsobandMap/IsobandMapFetch.svelte';
   import RasterMapFetch from '../RasterMap/RasterMapFetch.svelte';
   import SmallMultiples from '../SmallMultiples/SmallMultiples.svelte';
 
@@ -24,18 +23,16 @@
     show?: string | null;
     /** Items to hide, `|` separated, same names as `show`. Applied after `show`. */
     hide?: string | null;
-    /** `raster` draws interpolated canvases from continuous values; anything else (default) draws vector isobands from the banded file. */
-    renderer?: string | null;
-    /** Filename in each date's folder. Defaults to `aus.tiff` for the raster renderer and `aus-banded.tiff` otherwise. */
+    /** Filename in each date's folder, holding continuous values. Defaults to `aus.tiff`. */
     file?: string | null;
-    /** Raster only: `smooth` for a continuous gradient; anything else (default) gives stepped bands. */
+    /** `smooth` for a continuous gradient; anything else (default) gives stepped bands. */
     look?: string | null;
-    /** Raster smooth look only: temperatures at the ends of the gradient. Default to the first and last band thresholds. */
+    /** Smooth look only: temperatures at the ends of the gradient. Default to the first and last band thresholds. */
     min?: string | null;
     max?: string | null;
   };
 
-  let { start, startOffset, days, show, hide, renderer, file, look, min, max }: Props = $props();
+  let { start, startOffset, days, show, hide, file, look, min, max }: Props = $props();
 
   /** `TITLE|dates` → Set { 'TITLE', 'DATES' } */
   const parseItems = (list?: string | null) => new Set(list?.toUpperCase().split('|').map(item => item.trim()));
@@ -54,15 +51,13 @@
     .catch(e => console.error(`[isobands] line layers failed ${JSON.stringify({ error: String(e) })}`));
 
   // Props come from the hash at load and never change, so reading them once is intended.
-  const isRaster = renderer === 'raster';
-  const filename = file ?? (isRaster ? 'aus.tiff' : 'aus-banded.tiff');
+  const filename = file ?? 'aus.tiff';
   const gradientDomain: [number, number] = [
     Number(min ?? SUMMER_HEAT_THRESHOLDS[0]),
     Number(max ?? SUMMER_HEAT_THRESHOLDS.at(-1))
   ];
 
-  /** Follows the parent's light/dark scheme; a new palette re-colours the map. */
-  const stepPalette = $derived(createSummerHeatPalette(colourScheme.mode));
+  /** Follows the parent's light/dark scheme; a new scale re-renders the map. */
   const colourScale = $derived(
     look === 'smooth'
       ? createGradientScale(gradientDomain, createContinuousScale(SequentialPalette.Red, colourScheme.mode, gradientDomain))
@@ -110,13 +105,7 @@
 
   {#snippet panel(forecast)}
     {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label.replace('\n', ' ')}`}
-    <div class="land-shadow">
-      {#if isRaster}
-        <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
-      {:else}
-        <IsobandMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} palette={stepPalette} {lineLayers} />
-      {/if}
-    </div>
+    <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
   {/snippet}
 
   {#snippet caption()}
@@ -138,21 +127,5 @@
     margin-inline: auto;
     /* Extra space before the maps, on top of the figure's grid gap. */
     margin-block-end: 10px;
-  }
-
-  /*
-   * A soft blur under the landmass, to define the coastline: black on light pages, white on dark ones.
-   * Both renderers leave everything outside the land transparent, so a drop shadow on the map element
-   * follows the coast exactly. The media query matches `colourScheme.mode`, which reads the same query.
-   */
-  .land-shadow {
-    --land-shadow-colour: rgb(0 0 0 / 0.5);
-    @media (prefers-color-scheme: dark) {
-      --land-shadow-colour: rgb(255 255 255 / 0.5);
-    }
-  }
-
-  .land-shadow :global(.map) {
-    filter: drop-shadow(0 0 1px var(--land-shadow-colour));
   }
 </style>

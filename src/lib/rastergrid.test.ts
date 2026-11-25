@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'vitest';
+import { collectPolygons } from './geo.ts';
 import {
+  boundaryPath,
   buildSampleMap,
   choosePixelWidth,
   createGradientScale,
   createRasterLayout,
   createSteppedScale,
   paintPixels,
-  rasteriseBoundary,
+  projectionFromLayout,
   renderRasterPixels,
   sampleBilinear,
   type RasterGrid,
@@ -46,44 +48,30 @@ describe('sampleBilinear', () => {
 describe('buildSampleMap', () => {
   it('maps pixels to fractional grid positions', () => {
     // Identity-ish projection: 2x2 output where pixel (x, y) is lon x+.5, lat 2-(y+.5).
-    const map = buildSampleMap({ invert: ([x, y]) => [x, 2 - y] }, { width: 2, height: 2 }, grid([1, 2, 3, 4]), new Uint8Array(4).fill(255));
+    const map = buildSampleMap({ invert: ([x, y]) => [x, 2 - y] }, { width: 2, height: 2 }, grid([1, 2, 3, 4]));
     assert.deepEqual([...map.slice(0, 2)], [0, 0]);
     assert.deepEqual([...map.slice(6, 8)], [1, 1]);
   });
 
-  it('skips pixels outside the boundary without projecting them', () => {
-    let calls = 0;
-    const invert = ([x, y]: [number, number]): [number, number] => (calls++, [x, 2 - y]);
-    const map = buildSampleMap({ invert }, { width: 2, height: 1 }, grid([1, 2, 3, 4]), new Uint8Array([255, 0]));
-    assert.equal(calls, 1);
-    assert.ok(Number.isNaN(map[2]));
-  });
-
   it('leaves NaN where the projection has no inverse', () => {
-    const map = buildSampleMap({ invert: () => null }, { width: 1, height: 1 }, grid([1, 2, 3, 4]), new Uint8Array([255]));
+    const map = buildSampleMap({ invert: () => null }, { width: 1, height: 1 }, grid([1, 2, 3, 4]));
     assert.ok(Number.isNaN(map[0]));
   });
 });
 
-describe('rasteriseBoundary', () => {
-  const square = (from: number, to: number) => [[from, from], [to, from], [to, to], [from, to], [from, from]] as const;
-
-  it('is fully covered inside and empty outside', () => {
-    const coverage = rasteriseBoundary([square(1, 3)], 4, 4);
-    assert.deepEqual([...coverage.slice(4, 8)], [0, 255, 255, 0]);
-    assert.deepEqual([...coverage.slice(0, 4)], [0, 0, 0, 0]);
+describe('boundaryPath', () => {
+  it('draws each ring as a closed subpath, rounded to 0.1px', () => {
+    const path = boundaryPath({
+      boundary: [
+        [[0, 0], [10.04, 0], [10, 10], [0, 0]],
+        [[2, 2], [3, 2], [3, 3], [2, 2]]
+      ]
+    });
+    assert.equal(path, 'M0,0L10,0L10,10L0,0ZM2,2L3,2L3,3L2,2Z');
   });
 
-  it('anti-aliases edges that cut through a pixel', () => {
-    const coverage = rasteriseBoundary([square(0.5, 3)], 4, 4);
-    assert.ok(coverage[1 * 4 + 0] > 100 && coverage[1 * 4 + 0] < 160, 'half-covered edge pixel');
-    assert.equal(coverage[1 * 4 + 1], 255);
-  });
-
-  it('treats an inner ring as a hole', () => {
-    const coverage = rasteriseBoundary([square(0, 4), square(1, 3)], 4, 4);
-    assert.equal(coverage[0], 255);
-    assert.equal(coverage[1 * 4 + 1], 0);
+  it('drops rings too short to enclose anything', () => {
+    assert.equal(boundaryPath({ boundary: [[[0, 0], [1, 1]]] }), '');
   });
 });
 
@@ -100,6 +88,25 @@ describe('createRasterLayout', () => {
   it('is shared between calls with the same boundary and width', () => {
     assert.equal(layoutAt(300), layoutAt(300));
   });
+
+  // The raster, land clip and line layers all rely on this: one fitted projection, rebuilt from plain data.
+  it('rebuilds the same projection the boundary was drawn with', () => {
+    const layout = layoutAt(300);
+    const projection = projectionFromLayout(layout);
+    const projectedSource = collectPolygons(boundary)
+      .flat(2)
+      .map(lonLat => projection(lonLat as [number, number]))
+      .filter((point): point is [number, number] => !!point);
+    const samples = layout.boundary.flat().filter((_, i) => i % 25 === 0);
+
+    assert.ok(samples.length > 10);
+    samples.forEach(([x, y]) =>
+      assert.ok(
+        projectedSource.some(([sx, sy]) => Math.abs(sx - x) < 1e-6 && Math.abs(sy - y) < 1e-6),
+        `boundary point ${JSON.stringify([x, y])} matches a source vertex`
+      )
+    );
+  });
 });
 
 describe('colour scales', () => {
@@ -114,14 +121,8 @@ describe('colour scales', () => {
 
   it('paints transparent where there is no data and colours elsewhere', () => {
     const scale = createGradientScale([0, 10], v => (v > 5 ? '#ffffff' : '#000000'));
-    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0, Number.NaN, Number.NaN]), scale, { width: 2, height: 1 }, new Uint8Array([255, 255]));
+    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0, Number.NaN, Number.NaN]), scale, { width: 2, height: 1 });
     assert.deepEqual([...pixels], [255, 255, 255, 255, 0, 0, 0, 0]);
-  });
-
-  it('scales alpha by boundary coverage on edge pixels', () => {
-    const scale = createGradientScale([0, 10], () => '#ffffff');
-    const pixels = paintPixels(grid([10, 10, 10, 10]), new Float32Array([0, 0]), scale, { width: 1, height: 1 }, new Uint8Array([128]));
-    assert.deepEqual([...pixels], [255, 255, 255, 128]);
   });
 });
 
@@ -183,13 +184,19 @@ describe('renderRasterPixels', () => {
     assert.equal(pixels[3], 0, 'top-left corner is outside the raster');
   });
 
-  it('crops to the boundary: far fewer pixels than the whole grid', async () => {
+  // The page crops to the land with an SVG clip, so the raster must not be cropped itself: it should cover
+  // more than the land does (the sample file is masked to land, so it bleeds only a little past the coast).
+  it('paints beyond the boundary, leaving the crop to the clip path', async () => {
     const layout = layoutAt(300);
     const { pixels } = await renderRasterPixels(tiff.slice(0), layout, stepped);
-    const boundaryCoverage = rasteriseBoundary(layout.boundary, layout.width, layout.height);
-    const insideBoundary = boundaryCoverage.filter(value => value > 0).length / boundaryCoverage.length;
-    assert.ok(insideBoundary < 0.8, 'boundary should not fill its whole bounding box');
-    assert.ok(coverage(pixels) <= insideBoundary + 0.001, 'nothing is painted outside the boundary');
+    // Shoelace area of the projected rings; holes are wound the other way, so they subtract.
+    const landArea = Math.abs(
+      layout.boundary
+        .flatMap(ring => ring.slice(1).map(([x, y], i) => ring[i][0] * y - x * ring[i][1]))
+        .reduce((sum, term) => sum + term, 0) / 2
+    );
+    const landShare = landArea / (layout.width * layout.height);
+    assert.ok(coverage(pixels) > landShare + 0.01, JSON.stringify({ painted: coverage(pixels), landShare }));
   });
 
   it('gradient output uses more distinct colours than stepped output', async () => {

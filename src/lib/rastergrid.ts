@@ -17,7 +17,8 @@ import type { RenderRasterJob } from './rastergrid.worker.ts';
 /*
  * Raster grids: reading a GeoTIFF, and drawing it as smooth, projected, colour-mapped pixels.
  * For each output pixel we invert the projection to a grid position, interpolate the grid there, and look the
- * value up in a colour scale. Rendering runs in one worker; the boundary mask and canvas sizing stay on the page.
+ * value up in a colour scale. Rendering runs in one worker and comes back as a PNG. The picture fills the
+ * layout's whole rectangle: the page crops it to the land with an SVG clip path (see `boundaryPath`).
  */
 
 /* -------- Reading a GeoTIFF -------- */
@@ -105,66 +106,16 @@ const GLOBAL_SPAN_DEGREES = 359;
 /** A ring of [x, y] points in output pixel space. */
 type PixelRing = readonly (readonly [x: number, y: number])[];
 
-/** Sub-scanlines per pixel row when measuring how much of a pixel the boundary covers. */
-const COVERAGE_SUBSAMPLES = 4;
-
-/**
- * How much of each output pixel (row-major, 0-255) lies inside the boundary, with an anti-aliased edge.
- * Rings are filled even-odd, so holes work. Each pixel row is sampled on a few horizontal lines, and each
- * line adds the exact horizontal overlap of its inside spans.
- */
-export const rasteriseBoundary = (rings: readonly PixelRing[], width: number, height: number): Uint8Array => {
-  // Edges bucketed by the pixel rows they touch, so each row only looks at its own edges.
-  const edgesByRow: (readonly number[])[][] = Array.from({ length: height }, () => []);
-  rings.forEach(ring =>
-    ring.slice(0, -1).forEach(([x0, y0], i) => {
-      const [x1, y1] = ring[i + 1];
-      if (y0 === y1) return;
-      const firstRow = Math.max(0, Math.floor(Math.min(y0, y1)));
-      const lastRow = Math.min(height - 1, Math.floor(Math.max(y0, y1)));
-      for (let row = firstRow; row <= lastRow; row++) edgesByRow[row].push([x0, y0, x1, y1]);
-    })
-  );
-
-  const coverage = new Uint8Array(width * height);
-  const rowOverlap = new Float32Array(width);
-  // Hot loop: plain loops, as this runs per output pixel.
-  for (let row = 0; row < height; row++) {
-    if (!edgesByRow[row].length) continue;
-    rowOverlap.fill(0);
-
-    for (let line = 0; line < COVERAGE_SUBSAMPLES; line++) {
-      const y = row + (line + 0.5) / COVERAGE_SUBSAMPLES;
-      const crossings = edgesByRow[row]
-        .filter(([, y0, , y1]) => y0 <= y !== y1 <= y)
-        .map(([x0, y0, x1, y1]) => x0 + ((y - y0) / (y1 - y0)) * (x1 - x0))
-        .sort((a, b) => a - b);
-
-      for (let span = 0; span + 1 < crossings.length; span += 2) {
-        const start = Math.max(0, crossings[span]);
-        const end = Math.min(width, crossings[span + 1]);
-        for (let x = Math.floor(start); x < Math.ceil(end); x++) {
-          rowOverlap[x] += Math.min(end, x + 1) - Math.max(start, x);
-        }
-      }
-    }
-    for (let x = 0; x < width; x++) coverage[row * width + x] = Math.round((rowOverlap[x] / COVERAGE_SUBSAMPLES) * 255);
-  }
-  return coverage;
-};
-
 /**
  * For every output pixel, where it lands in the grid as fractional [column, row] (pixel centres at
  * integers, matching bilinear sampling). Stored as interleaved Float32 pairs, NaN where the pixel
- * is off the map or outside the boundary (zero `coverage`), which skips the projection for them.
- * Depends only on the projection, boundary and grid geometry, not the values, so it is reused between
- * rasters with the same grid.
+ * is off the map. Depends only on the projection and grid geometry, not the values, so it is reused
+ * between rasters with the same grid.
  */
 export const buildSampleMap = (
   projection: Pick<GeoProjection, 'invert'>,
   { width, height }: { width: number; height: number },
-  { origin, resolution, width: gridWidth }: Pick<RasterGrid, 'origin' | 'resolution' | 'width'>,
-  coverage: Uint8Array
+  { origin, resolution, width: gridWidth }: Pick<RasterGrid, 'origin' | 'resolution' | 'width'>
 ): Float32Array => {
   const map = new Float32Array(width * height * 2).fill(Number.NaN);
   const isGlobal = Math.abs(resolution[0]) * gridWidth >= GLOBAL_SPAN_DEGREES;
@@ -172,7 +123,6 @@ export const buildSampleMap = (
   // Hot loop: plain for loops, as this runs once per output pixel.
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (coverage[y * width + x] === 0) continue;
       const lonLat = projection.invert?.([x + 0.5, y + 0.5]);
       if (!lonLat || !Number.isFinite(lonLat[0]) || !Number.isFinite(lonLat[1])) continue;
 
@@ -219,16 +169,12 @@ export const sampleBilinear = (grid: RasterGrid, column: number, row: number): n
   return totalWeight === 0 ? Number.NaN : sum / totalWeight;
 };
 
-/**
- * Paints the grid into RGBA pixels (row-major, `width` x `height`); transparent where there is no data or
- * outside the boundary. Pixels on the boundary's edge get their alpha scaled by `coverage`.
- */
+/** Paints the grid into RGBA pixels (row-major, `width` x `height`); transparent where there is no data. */
 export const paintPixels = (
   grid: RasterGrid,
   sampleMap: Float32Array,
   scale: ColourScale,
-  { width, height }: { width: number; height: number },
-  coverage: Uint8Array
+  { width, height }: { width: number; height: number }
 ): Uint8ClampedArray => {
   const pixels = new Uint8ClampedArray(width * height * 4);
   const packed = new Uint32Array(pixels.buffer);
@@ -249,9 +195,7 @@ export const paintPixels = (
       colour = Math.min(lastColour, Math.max(0, Math.round(((value - min) / (max - min)) * lastColour)));
     }
 
-    const rgba = palette[colour];
-    const edge = coverage[i];
-    packed[i] = edge === 255 ? rgba : ((Math.round(((rgba >>> 24) * edge) / 255) << 24) | (rgba & 0xffffff)) >>> 0;
+    packed[i] = palette[colour];
   }
   return pixels;
 };
@@ -259,9 +203,12 @@ export const paintPixels = (
 /* -------- Rendering -------- */
 
 /**
- * Everything needed to rebuild a fitted projection (which can't be posted to a worker), the pixel size it
- * was fitted to, and the boundary the picture is cropped to. The projection is fully determined by these,
- * since fitting only sets scale and translate.
+ * A panel's one fitted projection, as plain data: everything needed to rebuild it (a projection can't be
+ * posted to a worker), the pixel size it was fitted to, and the boundary already projected with it.
+ * The projection is fully determined by these, since fitting only sets scale and translate.
+ *
+ * Every layer of a panel draws in this layout's pixel space (the raster, the land clip, borders and roads),
+ * so they can't drift apart: nothing is ever refitted at another size.
  */
 export type RasterLayout = {
   readonly projectionId: ProjectionId;
@@ -270,7 +217,7 @@ export type RasterLayout = {
   readonly translate: readonly [x: number, y: number];
   readonly width: number;
   readonly height: number;
-  /** The boundary's rings, already projected into output pixel space. Pixels outside it are left transparent. */
+  /** The boundary's rings, already projected into output pixel space. Used as the land clip path. */
   readonly boundary: readonly PixelRing[];
 };
 
@@ -278,20 +225,40 @@ export type RasterLayout = {
 export const projectionFromLayout = ({ projectionId, centreLon, scale, translate }: RasterLayout) =>
   PROJECTION_BUILDERS[projectionId].create(centreLon).scale(scale).translate([...translate]);
 
-/** A finished render, carrying the size it was rendered at so it can't be drawn onto a canvas of another size. */
-export type RasterImage = { width: number; height: number; pixels: Uint8ClampedArray };
+/** Rounds to 0.1px: plenty for a clip path, and keeps the path string short. */
+const roundPixel = (value: number) => Math.round(value * 10) / 10;
+
+/**
+ * The layout's boundary as an SVG path `d`, in the layout's pixel space. Draw it with `clip-rule="evenodd"`
+ * so inner rings (lakes) become holes.
+ */
+export const boundaryPath = ({ boundary }: Pick<RasterLayout, 'boundary'>): string =>
+  boundary
+    .filter(ring => ring.length > 2)
+    .map(ring => `M${ring.map(([x, y]) => `${roundPixel(x)},${roundPixel(y)}`).join('L')}Z`)
+    .join('');
 
 export type RenderResult = {
-  /** RGBA, `layout.width` x `layout.height`, transparent where there's no data or outside the boundary. */
+  /** RGBA, `layout.width` x `layout.height`, transparent where there's no data. */
   pixels: Uint8ClampedArray;
   /** True if the pixel-to-grid map from the previous render was reused. */
   reusedSampleMap: boolean;
 };
 
-/** The last sample map and boundary coverage built: panels in a set share a layout and grid, so they are built once. */
-let lastSampleMap: { key: string; map: Float32Array; coverage: Uint8Array } | undefined;
+/** A finished render as a PNG, ready for an SVG `<image>`. */
+export type RenderedImage = { blob: Blob; reusedSampleMap: boolean };
 
-/** Reads the GeoTIFF and paints it as RGBA pixels in the layout's pixel space, cropped to its boundary. */
+/** Encodes RGBA pixels as a PNG. Works in a worker and on the page. */
+export const encodePng = (pixels: Uint8ClampedArray, width: number, height: number): Promise<Blob> => {
+  const canvas = new OffscreenCanvas(width, height);
+  canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
+  return canvas.convertToBlob({ type: 'image/png' });
+};
+
+/** The last sample map built: panels in a set share a layout and grid, so it is built once. */
+let lastSampleMap: { key: string; map: Float32Array } | undefined;
+
+/** Reads the GeoTIFF and paints it as RGBA pixels covering the layout's whole rectangle. */
 export const renderRasterPixels = async (
   buffer: ArrayBuffer,
   layout: RasterLayout,
@@ -302,13 +269,10 @@ export const renderRasterPixels = async (
   const key = JSON.stringify({ layout, origin: grid.origin, resolution: grid.resolution, width: grid.width });
   const reusedSampleMap = lastSampleMap?.key === key;
   if (!reusedSampleMap) {
-    const projection = projectionFromLayout(layout);
-    const coverage = rasteriseBoundary(layout.boundary, layout.width, layout.height);
-    lastSampleMap = { key, coverage, map: buildSampleMap(projection, layout, grid, coverage) };
+    lastSampleMap = { key, map: buildSampleMap(projectionFromLayout(layout), layout, grid) };
   }
 
-  const { map, coverage } = lastSampleMap!;
-  return { pixels: paintPixels(grid, map, colourScale, layout, coverage), reusedSampleMap };
+  return { pixels: paintPixels(grid, lastSampleMap!.map, colourScale, layout), reusedSampleMap };
 };
 
 /* -------- Canvas size -------- */
@@ -387,7 +351,7 @@ export const createRasterLayout = (projectionId: ProjectionId, clip: GeoJsonInpu
 let host: WorkerHost | undefined;
 
 /**
- * Paints a GeoTIFF as RGBA pixels (`layout.width` x `layout.height`) in the worker. Jobs queue and can't be
+ * Paints a GeoTIFF as a PNG (`layout.width` x `layout.height`) in the worker. Jobs queue and can't be
  * cancelled: callers should ignore stale results.
  * The buffer is copied before being transferred, so the caller's ArrayBuffer stays usable.
  */
@@ -395,8 +359,11 @@ export const renderRasterInWorker = async (
   tiff: ArrayBuffer,
   layout: RasterLayout,
   colourScale: ColourScale
-): Promise<RenderResult> => {
-  if (typeof Worker === 'undefined') return renderRasterPixels(tiff, layout, colourScale);
+): Promise<RenderedImage> => {
+  if (typeof Worker === 'undefined') {
+    const { pixels, reusedSampleMap } = await renderRasterPixels(tiff, layout, colourScale);
+    return { blob: await encodePng(pixels, layout.width, layout.height), reusedSampleMap };
+  }
 
   host ??= new WorkerHost({
     workers: [new Worker(new URL('./rastergrid.worker.ts', import.meta.url), { type: 'module' })],
@@ -406,7 +373,7 @@ export const renderRasterInWorker = async (
   const buffer = tiff.slice(0);
   const job: RenderRasterJob = { buffer, layout, colourScale };
   return host
-    .push<RenderResult>('renderRaster', job, { transferList: [buffer] })
+    .push<RenderedImage>('renderRaster', job, { transferList: [buffer] })
     .catch((message: unknown) => {
       // workiq rejects with the worker's error message rather than an Error.
       throw message instanceof Error ? message : new Error(String(message));

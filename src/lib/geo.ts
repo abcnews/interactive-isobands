@@ -334,8 +334,7 @@ export const simplestyle = (p: GeoJsonProperties) => ({
 });
 
 export type LayoutPath = { d: string } & ReturnType<typeof simplestyle>;
-/** `projection` is the fitted projection, for drawing other layers (e.g. borders) in line with the bands. */
-export type Layout = { width: number; height: number; paths: LayoutPath[]; projection: GeoProjection };
+export type Layout = { width: number; height: number; paths: LayoutPath[] };
 
 type BuildLayoutOptions = {
   bands?: FeatureCollection;
@@ -381,7 +380,7 @@ export const buildLayout = ({ bands, projection, wholeWorld = false, width = WID
 
   const toPath = geoPath(fit.projection);
   const paths = features.map((feature) => ({ d: toPath(feature) ?? '', ...simplestyle(feature.properties) }));
-  return { width, height: fit.height, paths, projection: fit.projection };
+  return { width, height: fit.height, paths };
 };
 
 /* ---- Export ---- */

@@ -1,68 +1,72 @@
+<script lang="ts" module>
+  import type { RasterLayout } from '../../lib/rastergrid.ts';
+
+  /** What layer components read from `getLayerCakeContext().custom`. */
+  export type MapCakeCustom = { layout: RasterLayout };
+</script>
+
 <script lang="ts">
+  import { LayerCake, Svg } from 'layercake';
   import type { MapLineLayer } from '../../lib/maplines.ts';
-  import { projectionFromLayout, type RasterImage, type RasterLayout } from '../../lib/rastergrid.ts';
+  import { projectionFromLayout } from '../../lib/rastergrid.ts';
   import MapLines from '../MapLines/MapLines.svelte';
+  import DataImage from './layers/DataImage.svelte';
+  import LandClip from './layers/LandClip.svelte';
 
   interface Props {
-    /** Projection fit shared by the panels of a set. Reserves the right space before an image arrives. */
+    /** The panel's one fitted projection. Every layer draws in its pixel space. Undefined until the panel is measured. */
     layout?: RasterLayout;
-    /** Rendered pixels, already cropped to the boundary. Draws an empty placeholder until supplied. */
-    image?: RasterImage;
+    /** Width / height of the panel. Comes from a layout at a nominal width, so space is reserved before `layout` exists. */
+    aspectRatio: number;
+    /** URL of the rendered PNG. The panel stays hidden until it arrives. */
+    imageUrl?: string;
     /** Alt text describing the map for screen readers. */
     alt?: string;
     /** Shown in place of the map. */
     error?: string;
-    /** Width / height of the space reserved while there is no layout. */
-    placeholderRatio?: number;
     /** Lines drawn over the map, e.g. state borders and roads. */
     lineLayers?: MapLineLayer[];
+    /** Called with the panel's measured CSS width. */
+    onresize?: (cssWidth: number) => void;
   }
 
-  let { layout, image, alt = 'Raster map', error, placeholderRatio = 4 / 3, lineLayers = [] }: Props = $props();
+  let { layout, aspectRatio, imageUrl, alt = 'Raster map', error, lineLayers = [], onresize }: Props = $props();
 
-  /** Lines are projected in the layout's pixel space; the SVG's viewBox then scales them with the canvas. */
+  const uid = $props.id();
+  const clipId = `${uid}-land`;
+
   const lineProjection = $derived(layout && lineLayers.length ? projectionFromLayout(layout) : undefined);
 
-  let canvas = $state<HTMLCanvasElement>();
-
-  /*
-   * The canvas is sized from the image, not the layout. When the panel resizes the layout changes straight
-   * away but the new image takes a worker round trip. Sizing from the layout would clear the canvas (any change
-   * to its width/height does) and leave old pixels that no longer match its size, which `ImageData` rejects.
-   * Sized from the image, the old render stays on screen, scaled by CSS, until the new one replaces it.
-   */
-  const canvasSize = $derived(image ?? layout);
-
-  $effect(() => {
-    const context = canvas?.getContext('2d');
-    if (!context || !image) return;
-    const { width, height, pixels } = image;
-
-    context.clearRect(0, 0, width, height);
-    context.putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
-  });
+  /** LayerCake measures the container; pass the width up so the panel can pick its pixel width. */
+  let measuredWidth = $state(0);
+  const reportWidth = (width: number) => {
+    measuredWidth = width;
+    onresize?.(width);
+  };
 </script>
 
-<figure aria-busy={!image && !error}>
+<figure aria-busy={!imageUrl && !error}>
   {#if error}
-    <div class="map message" style:aspect-ratio={placeholderRatio} role="alert">{error}</div>
-  {:else if !canvasSize}
-    <div class="map" style:aspect-ratio={placeholderRatio}></div>
+    <div class="message" style:aspect-ratio={aspectRatio} role="alert">{error}</div>
   {:else}
-    <div class="frame" class:ready={!!image}>
-      <canvas
-        bind:this={canvas}
-        class="map"
-        width={canvasSize.width}
-        height={canvasSize.height}
-        role="img"
-        aria-label={alt}
-      ></canvas>
-      {#if layout && lineProjection}
-        <svg class="lines" viewBox="0 0 {layout.width} {layout.height}" aria-hidden="true">
-          <MapLines projection={lineProjection} layers={lineLayers} />
-        </svg>
-      {/if}
+    <div class="panel" class:ready={!!imageUrl} style:aspect-ratio={aspectRatio}>
+      <!-- Layers only render once `layout` exists, so they can read it as `MapCakeCustom`. -->
+      <LayerCake custom={{ layout }} bind:containerWidth={() => measuredWidth, reportWidth}>
+        {#if layout}
+          <!-- The viewBox is the layout's pixel space, so CSS scales every layer together and nothing is refitted. -->
+          <Svg viewBox="0 0 {layout.width} {layout.height}" label={alt}>
+            {#snippet defs()}
+              <LandClip id={clipId} />
+            {/snippet}
+            {#if imageUrl}
+              <DataImage href={imageUrl} {clipId} />
+            {/if}
+            {#if lineProjection}
+              <MapLines projection={lineProjection} layers={lineLayers} />
+            {/if}
+          </Svg>
+        {/if}
+      </LayerCake>
     </div>
   {/if}
 </figure>
@@ -77,30 +81,27 @@
     margin: 0;
   }
 
-  .map {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  /* The lines fade in with the picture, so they never show over an empty panel. */
-  .frame {
+  /* Hidden until the picture arrives, so borders and roads never show over an empty panel. */
+  .panel {
     position: relative;
     width: 100%;
     opacity: 0;
     transition: opacity 0.25s;
+
+    /* Soft blur under the landmass to define the coast: black on light pages, white on dark ones. */
+    --land-shadow-colour: rgb(0 0 0 / 0.5);
+    @media (prefers-color-scheme: dark) {
+      --land-shadow-colour: rgb(255 255 255 / 0.5);
+    }
   }
 
-  .frame.ready {
+  .panel.ready {
     opacity: 1;
   }
 
-  .lines {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
+  /* The SVG is transparent outside the land clip, so the shadow follows the coast. */
+  .panel :global(.layercake-layout-svg) {
+    filter: drop-shadow(0 0 1px var(--land-shadow-colour));
   }
 
   .message {
@@ -108,6 +109,7 @@
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
+    width: 100%;
     padding: 1em;
     text-align: center;
     opacity: 0.7;

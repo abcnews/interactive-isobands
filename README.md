@@ -15,10 +15,11 @@ Configure with the URL hash, e.g. `#startOffset=1&days=6&hide=ATTRIBUTION`.
 - `days`: number of days. Defaults to 6.
 - `show`: `|`-separated list of `TITLE|LEGEND|DATES|ATTRIBUTION` to show; anything not listed is hidden.
 - `hide`: the same list, to hide instead.
-- `renderer`: `raster` for canvas maps. Defaults to vector isobands.
-- `look`: raster only, `smooth` for a gradient.
-- `min`, `max`: raster smooth only, gradient end temperatures.
-- `file`: filename in each date's folder.
+- `look`: `smooth` for a gradient. Defaults to stepped bands.
+- `min`, `max`: smooth look only, gradient end temperatures.
+- `file`: filename in each date's folder. Defaults to `aus.tiff`.
+
+Each map is a LayerCake SVG: the raster picture (rendered in a worker, clipped to the land), then roads and state borders. All layers share one fitted projection (`RasterLayout`).
 
 ## Publishing (during Aunty Next development)
 

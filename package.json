@@ -35,7 +35,7 @@
     "@abcnews/components-storylab": "^0.3.1",
     "@abcnews/env-utils": "^6.0.0",
     "@abcnews/mount-utils": "^3.0.1",
-    "@abcnews/palette": "^1.0.2",
+    "@abcnews/palette": "^2.0.0",
     "@turf/area": "^7.4.0",
     "@turf/bbox": "^7.4.0",
     "@turf/bbox-polygon": "^7.4.0",
@@ -53,6 +53,7 @@
     "d3-contour": "^4.0.2",
     "d3-geo": "^3.1.1",
     "geotiff": "^3.0.5",
+    "layercake": "^11.0.0",
     "workiq": "^1.0.0"
   },
   "contributors": [
