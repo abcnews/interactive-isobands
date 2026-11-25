@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, DAYS_AHEAD, forecastTitle, formatPanelDate, ordinal, resolveDateRange } from './forecastdates.ts';
+import { addDays, DAYS_AHEAD, forecastTitle, formatPanelDate, resolveDateRange } from './forecastdates.ts';
 
 /** Consecutive YYYY-MM-DD dates from `start`. */
 const run = (start: string, length: number) => Array.from({ length }, (_, i) => addDays(start, i));
@@ -14,31 +14,33 @@ describe('forecastTitle', () => {
   });
 
   it('gives dates for a week that starts later', () => {
-    expect(forecastTitle({ dates: run('2026-10-20', 6), today })).toBe('High-temperature forecast for Tuesday 20–25 Oct');
+    expect(forecastTitle({ dates: run('2026-10-20', 6), today })).toBe('High-temperature forecast for Tuesday October 20–25');
   });
 
   it('names today and tomorrow for a single day', () => {
-    expect(forecastTitle({ dates: [today], today })).toBe('High-temperature forecast for today, Sunday 18 Oct');
-    expect(forecastTitle({ dates: ['2026-10-19'], today })).toBe('High-temperature forecast for tomorrow, Monday 19 Oct');
-    expect(forecastTitle({ dates: ['2026-10-21'], today })).toBe('High-temperature forecast for Wednesday 21 Oct');
+    expect(forecastTitle({ dates: [today], today })).toBe('High-temperature forecast for today, Sunday October 18');
+    expect(forecastTitle({ dates: ['2026-10-19'], today })).toBe('High-temperature forecast for tomorrow, Monday October 19');
+    expect(forecastTitle({ dates: ['2026-10-21'], today })).toBe('High-temperature forecast for Wednesday October 21');
   });
 
   it('shows one month for a range within a month', () => {
-    expect(forecastTitle({ dates: run(today, 3), today })).toBe('High-temperature forecast for Sunday 18–20 Oct');
+    expect(forecastTitle({ dates: run(today, 3), today })).toBe('High-temperature forecast for Sunday October 18–20');
   });
 
   it('shows both months for a range across months', () => {
-    expect(forecastTitle({ dates: run('2026-10-30', 4), today })).toBe('High-temperature forecast for Friday 30 Oct–2 Nov');
+    expect(forecastTitle({ dates: run('2026-10-30', 4), today })).toBe(
+      'High-temperature forecast for Friday October 30–November 2'
+    );
   });
 
   it('adds the year when it is not the current one', () => {
-    expect(forecastTitle({ dates: run('2023-10-15', 3), today })).toBe('High-temperature forecast for Sunday 15–17 Oct 2023');
-    expect(forecastTitle({ dates: ['2023-10-15'], today })).toBe('High-temperature forecast for Sunday 15 Oct 2023');
+    expect(forecastTitle({ dates: run('2023-10-15', 3), today })).toBe('High-temperature forecast for Sunday October 15–17, 2023');
+    expect(forecastTitle({ dates: ['2023-10-15'], today })).toBe('High-temperature forecast for Sunday October 15, 2023');
   });
 
   it('shows both years for a range across years', () => {
     expect(forecastTitle({ dates: run('2023-12-30', 4), today })).toBe(
-      'High-temperature forecast for Saturday 30 Dec 2023–2 Jan 2024'
+      'High-temperature forecast for Saturday December 30, 2023–January 2, 2024'
     );
   });
 
@@ -79,17 +81,9 @@ describe('resolveDateRange startOffset', () => {
   });
 });
 
-describe('ordinal', () => {
-  it('uses the right English suffix, including the teens', () => {
-    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 29, 31].map(ordinal)).toEqual([
-      '1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '29th', '31st'
-    ]);
-  });
-});
-
 describe('formatPanelDate', () => {
-  it('formats as "Weekday,\\nMonth the Nth"', () => {
-    expect(formatPanelDate('2025-01-29')).toBe('Wednesday,\nJanuary the 29th');
-    expect(formatPanelDate('2026-11-22')).toBe('Sunday,\nNovember the 22nd');
+  it('formats as "Weekday\\nMonth D"', () => {
+    expect(formatPanelDate('2025-01-29')).toBe('Wednesday\nJanuary 29');
+    expect(formatPanelDate('2026-10-18')).toBe('Sunday\nOctober 18');
   });
 });

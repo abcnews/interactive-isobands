@@ -17,30 +17,28 @@ const MS_PER_DAY = 1000 * 60 * 60 * 24;
 // Date labels
 // ---------------------------------------------------------------------------
 
-const ORDINAL_SUFFIXES: Record<Intl.LDMLPluralRule, string> = {
-  one: 'st',
-  two: 'nd',
-  few: 'rd',
-  other: 'th',
-  zero: 'th',
-  many: 'th'
+/**
+ * The pieces every date label is built from, e.g. Sunday / October / 18 / 2026. Read at noon UTC
+ * so the label stays on the right calendar day in any browser time zone.
+ */
+const dateParts = (ymd: string) => {
+  const date = new Date(`${ymd}T12:00:00Z`);
+  const format = (options: Intl.DateTimeFormatOptions) => date.toLocaleDateString('en-AU', { ...options, timeZone: 'UTC' });
+  return {
+    weekday: format({ weekday: 'long' }),
+    month: format({ month: 'long' }),
+    day: date.getUTCDate(),
+    year: date.getUTCFullYear()
+  };
 };
-const ordinalRules = new Intl.PluralRules('en-AU', { type: 'ordinal' });
-
-/** 1 → "1st", 22 → "22nd", 13 → "13th". */
-export const ordinal = (value: number) => `${value}${ORDINAL_SUFFIXES[ordinalRules.select(value)]}`;
 
 /**
- * A YYYY-MM-DD date as "Wednesday,\nJanuary the 29th". The newline puts the weekday on its own
- * line when rendered with `white-space: pre-line`. Read at noon UTC so the label stays on the
- * right calendar day in any browser time zone.
+ * A YYYY-MM-DD date as "Sunday\nOctober 18". The newline puts the weekday on its own line when
+ * rendered with `white-space: pre-line`; replace it with a space for one-line text such as alt text.
  */
 export const formatPanelDate = (ymd: string) => {
-  const date = new Date(`${ymd}T12:00:00Z`);
-  const [weekday, month] = (['weekday', 'month'] as const).map(part =>
-    date.toLocaleDateString('en-AU', { [part]: 'long', timeZone: 'UTC' })
-  );
-  return `${weekday},\n${month} the ${ordinal(date.getUTCDate())}`;
+  const { weekday, month, day } = dateParts(ymd);
+  return `${weekday}\n${month} ${day}`;
 };
 
 // ---------------------------------------------------------------------------
@@ -51,43 +49,31 @@ const TITLE_PREFIX = 'High-temperature forecast';
 /** Runs at least this long that start today or tomorrow are called "the next week" rather than given dates. */
 const NEXT_WEEK_MIN_DAYS = 6;
 
-/** The pieces of a YYYY-MM-DD date a title is built from, e.g. Sunday / 18 / Oct / 2026. */
-const titleParts = (ymd: string) => {
-  const date = new Date(`${ymd}T12:00:00Z`);
-  const format = (options: Intl.DateTimeFormatOptions) =>
-    date.toLocaleDateString('en-AU', { ...options, timeZone: 'UTC' });
-  return {
-    weekday: format({ weekday: 'long' }),
-    day: date.getUTCDate(),
-    month: format({ month: 'short' }),
-    year: date.getUTCFullYear()
-  };
-};
-
-/** "Sunday 18 Oct", plus the year when it isn't the current one. */
+/** "Sunday October 18", plus ", 2023" when it isn't the current year. */
 const describeDay = (ymd: string, currentYear: number) => {
-  const { weekday, day, month, year } = titleParts(ymd);
-  return [weekday, day, month, year !== currentYear && year].filter(Boolean).join(' ');
+  const { weekday, day, month, year } = dateParts(ymd);
+  return `${weekday} ${month} ${day}${year !== currentYear ? `, ${year}` : ''}`;
 };
 
 /**
- * "Sunday 18–20 Oct", "Friday 30 Oct–2 Nov", "Saturday 30 Dec 2023–2 Jan 2024".
- * The month (and year) is only repeated on the start when it differs from the end.
+ * "Sunday October 18–20", "Friday October 30–November 2", "Saturday December 30, 2023–January 2, 2024".
+ * The month is only repeated on the end when it differs from the start; the year shows only when it
+ * isn't the current one, and on both ends when they differ.
  */
 const describeRange = (first: string, last: string, currentYear: number) => {
-  const [start, end] = [titleParts(first), titleParts(last)];
+  const [start, end] = [dateParts(first), dateParts(last)];
   const yearsDiffer = start.year !== end.year;
   const showYear = yearsDiffer || end.year !== currentYear;
-  const startText = [start.weekday, start.day, (yearsDiffer || start.month !== end.month) && start.month, yearsDiffer && start.year];
-  const endText = [end.day, end.month, showYear && end.year];
-  return `${startText.filter(Boolean).join(' ')}–${endText.filter(Boolean).join(' ')}`;
+  const startText = `${start.weekday} ${start.month} ${start.day}${yearsDiffer ? `, ${start.year}` : ''}`;
+  const endMonth = yearsDiffer || start.month !== end.month ? `${end.month} ` : '';
+  return `${startText}–${endMonth}${end.day}${showYear ? `, ${end.year}` : ''}`;
 };
 
 /**
  * A title describing the dates shown, so an evergreen embed never says the wrong thing:
  * - a week or so from today or tomorrow: "…for the next week"
- * - one day: "…for today, Sunday 18 Oct" (or "tomorrow, …", or just the date)
- * - otherwise the range: "…for Sunday 18–20 Oct", with the year only when it isn't this year.
+ * - one day: "…for today, Sunday October 18" (or "tomorrow, …", or just the date)
+ * - otherwise the range: "…for Sunday October 18–20", with the year only when it isn't this year.
  */
 export const forecastTitle = ({ dates, today = todayInSydney() }: { dates: string[]; today?: string }) => {
   const [first, last] = [dates[0], dates.at(-1)];
