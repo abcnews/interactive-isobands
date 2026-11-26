@@ -1,5 +1,6 @@
 <script lang="ts" generics="T extends { key: string; label: string }">
   import type { Snippet } from 'svelte';
+  import Unpull from '../Unpull/Unpull.svelte';
 
   interface Props {
     /** Panels to show; `key` identifies each one and `label` is the text above it */
@@ -16,6 +17,8 @@
     showLabels?: boolean;
   }
 
+  const shouldUnpull = new URLSearchParams(document.location.search).get('abcnewsembedpull') === 'true';
+
   let { items, heading, panel, caption, desktopMinWidth = 700, showLabels = true }: Props = $props();
 
   // Measured on the figure itself rather than with a viewport media query: embeds sit in columns and
@@ -26,20 +29,22 @@
   const columns = $derived(Math.min(items.length || 1, isDesktop ? 3 : 2));
 </script>
 
-<figure bind:clientWidth={figureWidth}>
-  {@render heading?.()}
-  <ul class:desktop={isDesktop} style:grid-template-columns="repeat({columns}, minmax(0, 1fr))">
-    {#each items as item (item.key)}
-      <li>
-        {#if showLabels}<p>{item.label}</p>{/if}
-        {@render panel(item)}
-      </li>
-    {/each}
-  </ul>
-  {#if caption}
-    <figcaption>{@render caption()}</figcaption>
-  {/if}
-</figure>
+<Unpull isUnPulled={shouldUnpull}>
+  <figure bind:clientWidth={figureWidth}>
+    {@render heading?.()}
+    <ul class:desktop={isDesktop} style:grid-template-columns="repeat({columns}, minmax(0, 1fr))">
+      {#each items as item (item.key)}
+        <li>
+          {#if showLabels}<p>{item.label}</p>{/if}
+          {@render panel(item)}
+        </li>
+      {/each}
+    </ul>
+    {#if caption}
+      <figcaption>{@render caption()}</figcaption>
+    {/if}
+  </figure>
+</Unpull>
 
 <style lang="scss">
   figure {
