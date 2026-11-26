@@ -19,7 +19,7 @@ Configure with the URL hash, e.g. `#startOffset=1&days=6&hide=ATTRIBUTION`.
 - `min`, `max`: smooth look only, gradient end temperatures.
 - `file`: filename in each date's folder. Defaults to `aus.tiff`.
 
-Each map is a LayerCake SVG: the raster picture (rendered in a worker, clipped to the land), then roads and state borders. All layers share one fitted projection (`RasterLayout`).
+Each map is a LayerCake SVG: the raster picture (rendered in a worker, clipped to the land), then roads and state borders, then an HTML layer of `PlaceLabel`s (places listed in `src/lib/places.ts`, the state and territory capitals). All layers share one fitted projection (`RasterLayout`).
 
 ## Publishing (during Aunty Next development)
 

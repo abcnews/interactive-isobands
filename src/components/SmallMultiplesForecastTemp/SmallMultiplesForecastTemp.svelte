@@ -6,6 +6,7 @@
   import { DATA_BASE_URL, forecastTitle, formatPanelDate, resolveDateRange } from '../../lib/forecastdates.ts';
   import { colourScheme, summerHeatColours, SUMMER_HEAT_THRESHOLDS } from '../../lib/palettes.ts';
   import { loadAusLineLayers, type MapLineLayer } from '../../lib/maplines.ts';
+  import { CAPITAL_CITIES } from '../../lib/places.ts';
   import { createGradientScale, createSteppedScale } from '../../lib/rastergrid.ts';
   import ABCAttribution from '../ABCAttribution/ABCAttribution.svelte';
   import ABCHeading from '../ABCHeading/ABCHeading.svelte';
@@ -42,6 +43,8 @@
   const isShown = (item: 'TITLE' | 'LEGEND' | 'DATES' | 'ATTRIBUTION') => (!show || shown.has(item)) && !hidden.has(item);
 
   const ausClip = ausMd as GeoJsonInput;
+
+  const places = CAPITAL_CITIES;
 
   // ---- State borders and roads, drawn over every panel ----
   // The maps render without them until they arrive; a failed load just leaves them off.
@@ -83,6 +86,9 @@
     label: formatPanelDate(ymd),
     url: `${DATA_BASE_URL}/ifs-t2m/${ymd}/${filename}`
   }));
+
+  /** Small multiples are too small for city names, so they only get the dots; a single map gets both. */
+  const showPlaceNames = forecasts.length === 1;
 </script>
 
 <SmallMultiples items={forecasts} showLabels={isShown('DATES')}>
@@ -105,7 +111,7 @@
 
   {#snippet panel(forecast)}
     {@const alt = `Map of forecast maximum temperatures across Australia for ${forecast.label.replace('\n', ' ')}`}
-    <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} />
+    <RasterMapFetch {alt} projection="australia" clipTo={ausClip} url={forecast.url} {colourScale} {lineLayers} {places} {showPlaceNames} />
   {/snippet}
 
   {#snippet caption()}

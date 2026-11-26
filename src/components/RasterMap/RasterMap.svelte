@@ -6,10 +6,12 @@
 </script>
 
 <script lang="ts">
-  import { LayerCake, Svg } from 'layercake';
+  import { Html, LayerCake, Svg } from 'layercake';
   import type { MapLineLayer } from '../../lib/maplines.ts';
+  import { positionPlaces, sidesNeedingGutter, type Place } from '../../lib/places.ts';
   import { projectionFromLayout } from '../../lib/rastergrid.ts';
   import MapLines from '../MapLines/MapLines.svelte';
+  import PlaceLabel from '../PlaceLabel/PlaceLabel.svelte';
   import DataImage from './layers/DataImage.svelte';
   import LandClip from './layers/LandClip.svelte';
 
@@ -26,16 +28,38 @@
     error?: string;
     /** Lines drawn over the map, e.g. state borders and roads. */
     lineLayers?: MapLineLayer[];
+    /** Places labelled over the map, e.g. capital cities. */
+    places?: Place[];
+    /** Show place names beside their symbols. When false, only the symbols are drawn. */
+    showPlaceNames?: boolean;
     /** Called with the panel's measured CSS width. */
     onresize?: (cssWidth: number) => void;
   }
 
-  let { layout, aspectRatio, imageUrl, alt = 'Raster map', error, lineLayers = [], onresize }: Props = $props();
+  let { layout, aspectRatio, imageUrl, alt = 'Raster map', error, lineLayers = [], places = [], showPlaceNames = true, onresize }: Props =
+    $props();
 
   const uid = $props.id();
   const clipId = `${uid}-land`;
 
-  const lineProjection = $derived(layout && lineLayers.length ? projectionFromLayout(layout) : undefined);
+  const projection = $derived(layout ? projectionFromLayout(layout) : undefined);
+  const lineProjection = $derived(lineLayers.length ? projection : undefined);
+  const positionedPlaces = $derived(
+    layout && projection ? positionPlaces({ places, projection, width: layout.width, height: layout.height }) : []
+  );
+
+  /**
+   * Labels are HTML that hangs off their dot, so a place near the coast (Brisbane, Hobart) pushes
+   * its name past the map's edge and off the frame. Shrink the map by a fixed gutter on each side
+   * that needs one. Hard-coded per side for the names there now:
+   * - right: "Brisbane" (~69px from its dot), which sits almost on the coast.
+   * - left: "Perth" (~44px), less whatever room there already is between Perth and the coast.
+   * Re-tune if the places near an edge change.
+   */
+  const PLACE_LABEL_GUTTER_PX: Record<Place['align'], number> = { left: 32, right: 72 };
+  // Symbols alone sit on the map, so only names need a gutter.
+  const gutterSides = $derived(showPlaceNames ? sidesNeedingGutter(positionedPlaces) : { left: false, right: false });
+  const gutterFor = (side: Place['align']) => (gutterSides[side] ? PLACE_LABEL_GUTTER_PX[side] : 0);
 
   /** LayerCake measures the container; pass the width up so the panel can pick its pixel width. */
   let measuredWidth = $state(0);
@@ -45,7 +69,7 @@
   };
 </script>
 
-<figure aria-busy={!imageUrl && !error}>
+<figure aria-busy={!imageUrl && !error} style:padding-inline="{gutterFor('left')}px {gutterFor('right')}px">
   {#if error}
     <div class="message" style:aspect-ratio={aspectRatio} role="alert">{error}</div>
   {:else}
@@ -65,6 +89,14 @@
               <MapLines projection={lineProjection} layers={lineLayers} />
             {/if}
           </Svg>
+          {#if positionedPlaces.length}
+            <!-- HTML, not SVG, so the label text stays 14px at any panel size. -->
+            <Html>
+              {#each positionedPlaces as { name, align, xPercent, yPercent } (name)}
+                <PlaceLabel label={name} {align} x="{xPercent}%" y="{yPercent}%" showText={showPlaceNames} />
+              {/each}
+            </Html>
+          {/if}
         {/if}
       </LayerCake>
     </div>
@@ -76,6 +108,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    box-sizing: border-box;
     width: 100%;
     min-width: 0;
     margin: 0;

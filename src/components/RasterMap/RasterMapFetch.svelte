@@ -4,6 +4,7 @@
   import type { ProjectionId } from '../../lib/geo.ts';
   import { inview } from '../../lib/inview.ts';
   import type { MapLineLayer } from '../../lib/maplines.ts';
+  import type { Place } from '../../lib/places.ts';
   import { choosePixelWidth, createRasterLayout, renderRasterInWorker, type ColourScale } from '../../lib/rastergrid.ts';
   import RasterMap from './RasterMap.svelte';
 
@@ -23,10 +24,24 @@
     rootMargin?: string;
     /** Lines drawn over the map, e.g. state borders and roads. */
     lineLayers?: MapLineLayer[];
+    /** Places labelled over the map. */
+    places?: Place[];
+    /** Show place names beside their symbols. When false, only the symbols are drawn. */
+    showPlaceNames?: boolean;
   }
 
-  let { url, alt, projection, clipTo, colourScale, pixelWidth: fixedPixelWidth, rootMargin = '600px', lineLayers }: Props =
-    $props();
+  let {
+    url,
+    alt,
+    projection,
+    clipTo,
+    colourScale,
+    pixelWidth: fixedPixelWidth,
+    rootMargin = '600px',
+    lineLayers,
+    places,
+    showPlaceNames
+  }: Props = $props();
 
   let near = $state(false);
   let buffer = $state.raw<ArrayBuffer>();
@@ -116,5 +131,5 @@
 </script>
 
 <div {@attach inview(rootMargin, () => (near = true))}>
-  <RasterMap {layout} {aspectRatio} {imageUrl} {alt} {error} {lineLayers} onresize={updateCssWidth} />
+  <RasterMap {layout} {aspectRatio} {imageUrl} {alt} {error} {lineLayers} {places} {showPlaceNames} onresize={updateCssWidth} />
 </div>
